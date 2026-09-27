@@ -149,10 +149,10 @@ names the field.
 | `id` | Required. `^[a-z0-9][a-z0-9-]{1,39}$` (2 to 40 lowercase letters, digits or hyphens, not starting with a hyphen). Not one of `magis`, `ditu`, `live`, `local`, `unknown`, `plugin`. It is the plugin's identity: never change it once people have installed it. |
 | `name` | Required. 1 to 40 characters. |
 | `version` | Required. `MAJOR.MINOR.PATCH` and nothing else (no `-beta`, no `+build`), each number up to 6 digits and without leading zeros. |
-| `apiVersion` | Required. An integer, `1` today. A higher number is refused with "Este plugin necesita una versión más nueva de Kino". |
+| `apiVersion` | Required. `1` or `2`. A higher number than Kino supports is refused with "Este plugin necesita una versión más nueva de Kino". Declare `2` only if you use something that needs it (below); otherwise stay on `1` so your plugin also runs on older Kino builds. |
 | `entry` | Required. Relative path of the JavaScript file: letters, digits, `.`, `_`, `-` and `/` only, no `..`, at most 200 characters, ends in `.js`. The file is at most 1 MB. |
-| `hosts` | Required. 1 to 20 entries; each a lowercase DNS name (`archive.org`) or `*.` plus a DNS name (`*.archive.org`). Host names only: no scheme, port or path. No bare `*`, no IP addresses, no `localhost`, nothing ending in `.local`, `.lan`, `.internal`, `.localhost` or `.home.arpa`, and at least one dot. **`*.x` covers subdomains only, not `x` itself**: if you need both, list both. |
-| `capabilities` | Required. A subset of `search`, `home`, `browse`, `episodes`, `resolve`. Must include `resolve` and at least one of `search` or `home`. Every capability you declare must be an exported function of the entry file, or the install fails with "El plugin no carga: le falta ...". |
+| `hosts` | Required. 1 to 20 entries; each a lowercase DNS name (`archive.org`), `*.` plus a DNS name (`*.archive.org`), or (apiVersion 2 only) an object `{ "host": "…", "insecureHttp": true }` (below). Host names only: no scheme, port or path. No bare `*`, no IP addresses, no `localhost`, nothing ending in `.local`, `.lan`, `.internal`, `.localhost` or `.home.arpa`, and at least one dot. **`*.x` covers subdomains only, not `x` itself**: if you need both, list both. |
+| `capabilities` | Required. A subset of `search`, `home`, `browse`, `episodes`, `resolve`, `download`, `drm`. Must include `resolve` and at least one of `search` or `home`. `search`, `home`, `browse`, `episodes` and `resolve` must each be an exported function of the entry file, or the install fails with "El plugin no carga: le falta ...". `download` and `drm` need `apiVersion: 2` and are declarative flags instead — the app acts on them, not your code, so nothing extra to export; declaring one shows its consent line ("Puede descargar videos para verlos sin conexión" / "Reproduce video protegido (DRM)") and needs approval again on an update that adds it. `download` gives your titles offline downloads (see [Downloads](#downloads-apiversion-2)); `drm` lets a `Stream` carry a Widevine license (see [A Widevine-protected stream](#a-widevine-protected-stream-apiversion-2)). |
 | `settings` | Optional. What the person fills in on your plugin's "Configurar" screen: see below. |
 | `permissions` | Optional. A list of names from the closed list in `contract.json`. **The list is empty in this version**: any name is refused with "permiso desconocido: …". It exists so a later version can add permissions (each one shown on the consent screen) without a new `apiVersion`. |
 | `color` | Optional `#RRGGBB`: the accent of your plugin's tab and chips. A neutral color by default. |
@@ -222,7 +222,109 @@ that is not an `http`/`https` URL, or whose host is `localhost`, a loopback addr
 `::1`), a link-local one (`169.254.x.x`, `fe80::`) or `0.0.0.0`. Addresses in the person's own network (`192.168.x.x`,
 `10.x.x.x`, a `.local` name) are allowed: that is the point.
 
-## 4. The contract (apiVersion 1)
+### Declaring an insecure host (apiVersion 2)
+
+A `hosts` entry can also be an object, for a site of yours that has no certificate:
+
+```json
+"hosts": ["archive.org", { "host": "cdn.example.org", "insecureHttp": true }]
+```
+
+This needs `"apiVersion": 2`. `insecureHttp: true` is the only thing it can carry beyond `host`, and
+it marks the only *declared* hosts (not the person's own server, above) allowed over plain `http`:
+`kino.fetch`, a `Stream`'s `url`, its `subtitles`, its `audioTracks` and a `drm` block's `licenseUrl`
+all accept `http://cdn.example.org/…` once it is declared this way, and every redirect hop is judged
+by the same rule. Every other declared host stays https-only, `https` keeps working on the insecure
+one, and the host is matched exactly: `sub.cdn.example.org` is not covered. The same rules as a plain
+string still apply (public DNS name, no `*`, no IP, nothing private/LAN; a name that resolves into
+the person's own network is still refused) plus one more: **no `*.` wildcard** — an insecure host is
+named exactly. The consent screen shows it in red, "Conexión sin cifrar con cdn.example.org", and an
+update that newly marks a host this way waits for approval like a brand new host would. See
+[A site of yours without a certificate](#a-site-of-yours-without-a-certificate-apiversion-2).
+
+### Downloads (apiVersion 2)
+
+Declare `"download"` in `capabilities` (with `"apiVersion": 2`) and Kino offers your titles for
+offline viewing: "Descargar" on the info page and "Guardar en el dispositivo" in the library, on
+phones (Kino never downloads on a TV). Nothing extra to export. When the person saves a title, Kino
+calls your `resolve(ref)` when the download actually runs, exactly as playing would, and saves the
+`Stream` as **one file**, with your `headers` on the request, through the same host gate as the player
+(https on your `hosts` or the person's own server, every redirect hop checked, never the home
+network). Your `subtitles` are saved next to it. `audioTracks` are **not** saved: the offline copy has
+only the audio inside the video file, so a source that dubs through separate tracks is heard in its
+main audio when offline.
+
+What downloads, and what does not:
+
+- A progressive file (`mp4`, `mkv`, `webm`, `ts`, …) downloads. The saved file takes its extension
+  from your `mime` when you give one, else from the URL, else `mp4`; the player sniffs the bytes anyway.
+- An HLS or DASH manifest (`.m3u8`, `.mpd`, a `mime` such as `application/vnd.apple.mpegurl` or
+  `application/dash+xml`, or a response whose `Content-Type` or first bytes say so, whatever the URL
+  looks like) does **not**: the download ends as "Este video no se puede descargar", a final state
+  with no "Reintentar" (it would refuse the same way) that the person can only remove. A
+  DRM-protected stream or a live channel is refused the same way. There is no separate "resolve for
+  download" call: if your source offers both a manifest and a file, prefer the file, or accept that
+  those titles play but do not download.
+- The queue downloads one title at a time, so a `ref` may wait a while before `resolve` is called:
+  keep something stable in it and look the fresh link up inside `resolve` (as recommended above). A
+  retry resumes the partial file even when your URL changed.
+- A plugin that is disabled, waiting for its settings, or uninstalled downloads nothing: its titles
+  show no download button, and a title already queued fails with "Este plugin ya no puede descargar
+  videos". Files already downloaded keep playing offline and stay removable in Descargas, whatever
+  happens to the plugin afterwards.
+
+Declaring `download` shows "Puede descargar videos para verlos sin conexión" on the consent sheet,
+and an update that newly declares it waits for the person's approval ([section 8](#8-publishing-your-plugin)).
+
+### Live channels (apiVersion 2)
+
+With `"apiVersion": 2` an item may be a live channel: `kind: "live"`, in any `home` row, `browse`
+page or `search` result, next to your movies and series. Nothing to declare beyond the version.
+
+```js
+export async function home() {
+  return [{
+    id: "en-vivo", title: "En vivo",
+    items: [
+      { id: "canal-1", ref: "live:1", title: "Canal Uno", kind: "live", poster: "https://cdn.example.org/canal-1.png" },
+    ],
+  }];
+}
+
+export async function resolve(ref) {
+  if (ref.startsWith("live:")) {
+    const url = await freshPlaylistUrlFor(ref); // look the live link up here, never in home()
+    return { url, mime: "application/vnd.apple.mpegurl" };
+  }
+  // ...movies and episodes as before
+}
+```
+
+What Kino does with a `live` item:
+
+- Its card wears an "EN VIVO" badge (Home, "Ver más", search, phone and TV), and tapping it goes
+  **straight to the player**: no info page, nothing to read or pick. `resolve(ref)` gets the item's
+  `ref`, exactly as for a movie.
+- The `Stream` plays as live: an HLS or DASH live manifest (`.m3u8`/`.mpd`) is what the player
+  expects; a progressive file plays too but reads as a channel (no seek bar, no length). `headers`,
+  `subtitles`, `audioTracks` and `expiresInSeconds` work as for any stream; `durationMs` is ignored.
+- The player shows the live overlay (no progress bar, no seeking, no "next") and starts at the live
+  edge. If it falls behind the live window, or the playlist resets or stalls, it re-joins the live
+  edge in place without calling you (a few times a minute). On any other cut, or when your URL
+  stops working, it calls `resolve` again with the same `ref` after 2 s, then 4 s, then 8 s: three
+  reopens, replenished once the channel has played for five seconds. Only after the third failed
+  reopen does the person read "Se cortó la señal de <canal> y no volvió". `expiresInSeconds` plays
+  no part for a channel: a cut always re-resolves.
+- A channel is never saved: no library row, no resume position, never in "Continuar viendo", and
+  never downloadable (a plugin that declares `download` gets "Este video no se puede descargar"
+  for it). `runtimeMinutes` on the item is ignored; a channel has no `episodes`.
+
+Limits: a `live` item from a plugin on `"apiVersion": 1` is dropped silently, like any invalid
+item (and a row left with no items disappears), so declare `2` before you return one. A channel
+still counts against the same row and page sizes as any item. Kino's own "Canales en vivo" row is
+native and separate: your channels appear in your rows, with your plugin's name.
+
+## 4. The contract (apiVersion 1 and 2)
 
 Your entry file is one ES module that exports one `async` function for each capability you
 declared, and nothing is called that you did not declare:
@@ -231,7 +333,7 @@ declared, and nothing is called that you did not declare:
 export async function search(query) { /* -> Item[] or Page */ }
 export async function home() { /* -> Row[] */ }
 export async function browse(ref, cursor) { /* -> Page */ }
-export async function episodes(ref) { /* -> { series?: SeriesInfo, episodes: Episode[] } */ }
+export async function episodes(ref) { /* -> { series?: SeriesInfo, episodes: Episode[], seasons?: Season[] } */ }
 export async function resolve(ref) { /* -> Stream */ }
 ```
 
@@ -259,12 +361,13 @@ return plain data: strings, numbers, booleans, arrays and objects.
 - `browse(ref, cursor)` gets the `ref` of one of your Home rows (or a `ref` a previous page gave),
   and `cursor` `null` for the first page or the `next` of the page before.
 - `episodes(ref)` gets the `ref` of a `series` item, as you returned it.
-- `resolve(ref)` gets the `ref` of a `movie` item, or the `ref` of an episode.
+- `resolve(ref)` gets the `ref` of a `movie` item, the `ref` of an episode, or (apiVersion 2) the
+  `ref` of a `live` item.
 
 ### What you return
 
 ```ts
-Item       = { id: string, ref: string, title: string, kind: "movie" | "series",
+Item       = { id: string, ref: string, title: string, kind: "movie" | "series" | "live",
                year?: string, poster?: string, backdrop?: string, overview?: string,
                lang?: string, quality?: string, originalTitle?: string,
                genres?: string[], rating?: number, runtimeMinutes?: number,
@@ -275,14 +378,29 @@ SeriesInfo = { title?: string, poster?: string, backdrop?: string, overview?: st
                ids?: { tmdb?: number, imdb?: string }, genres?: string[], year?: string }
 Episode    = { season: number, number: number, ref: string, title?: string,
                still?: string, overview?: string, airDate?: string, runtimeMinutes?: number }
+Season     = { id: string, ref: string, title: string, number?: number, current?: boolean }
 Stream     = { url: string, mime?: string, headers?: Record<string, string>,
                subtitles?: { lang: string, url: string, format?: "vtt" | "srt" }[],
-               durationMs?: number, expiresInSeconds?: number }
+               audioTracks?: { lang: string, url: string, label?: string }[],
+               durationMs?: number, expiresInSeconds?: number,
+               drm?: { type: "widevine", licenseUrl: string, licenseHeaders?: Record<string, string> } }
 ```
 
 **How the pieces connect.** A `movie` item's `ref` goes to `resolve`. A `series` item's `ref` goes to
-`episodes`, and each episode's `ref` goes to `resolve`. A row's `ref` goes to `browse`, and so does
-each page's `next`.
+`episodes`, and each episode's `ref` goes to `resolve`. A `live` item's `ref` (apiVersion 2, see
+[Live channels](#live-channels-apiversion-2)) goes to `resolve` too, and its Stream plays as live. A
+row's `ref` goes to `browse`, and so does each page's `next`.
+
+**Seasons.** Two shapes, and your `episodes` answer says which. When every season of a show is in
+one list, give each episode its `season` and leave `seasons` out: Kino reads the seasons from the
+episodes and shows a selector that only filters the list. When your source keeps each season as its
+own `series` item (its own `id` and `ref`, as a search would list it), return only that season's
+episodes and list every season of the show in `seasons`, the one you are answering for included:
+`{ id, ref, title, number?, current? }`, with `title` what the selector shows ("Temporada 2") and
+`current: true` on the season being listed (Kino also recognizes it by `id`). Kino shows the seasons
+as chips; choosing another one calls `episodes` with that season's `ref` and opens it as that title,
+with its own progress in the library. `seasons` is optional and new in this revision of apiVersion 1:
+a plugin that never returns it keeps working exactly as before.
 
 **Paging ("Ver más").** If you declare `browse`, a Home row with a `ref` gets a "Ver más" card that
 opens a grid: Kino calls `browse(ref, null)`, then `browse(ref, next)` while the person scrolls and
@@ -310,39 +428,84 @@ all or nothing.
 | `browse` result | A `Page` of at most 100 items. |
 | `home` result | At most 20 rows of at most 60 items each. A row needs a unique `id` (same pattern as an item id) and a non-blank `title`; rows with no valid items are dropped. Kino shows them after its own rows, labelled with your plugin's name, and caches them for 6 hours (stale rows show while it refreshes; an answer with no valid rows, or over 2 MB, is not cached and is asked again next time). If `home()` fails you contribute no rows and Home is not blocked. |
 | `episodes` result | At most 5000 episodes. `number` is required and from 1 to 99999 (an episode numbered 0, such as a special, is dropped). `season` should be from 1 to 999; a missing or out-of-range season becomes 1. `ref` is required. A repeated season and number is dropped. Without a `title`, Kino shows "Capítulo N". |
+| `seasons` (in the `episodes` result) | Optional; at most 50. Each needs an `id` (same pattern as an item id; a repeated one is dropped), a non-empty `ref` of at most 4096 characters and a non-blank `title` (up to 200 characters), or it is dropped. `number` from 1 to 999 and `current` a boolean; a wrong one is ignored, not the season. Anything that is not a list is ignored. |
 | `id` | `^[A-Za-z0-9._~-]{1,128}$`. Anything else drops the item, so if your source's own ids have other characters (spaces, `/`, `:`, `%`), derive a stable id yourself, such as a slug. Repeated ids in one list are dropped. |
 | `ref` | A non-empty string of at most 4096 characters. |
 | `kind` | `"movie"` or `"series"`. A `series` item from a plugin that does not declare `episodes` is dropped: it could never be opened. |
 | Text fields | `title` is required and non-blank, up to 200 characters. `overview` up to 2000; `lang` and `quality` up to 20 (for example `"es"`, `"1080p"`); `year` up to 10 (a number is accepted and converted). Longer text is cut; the text of `SeriesInfo` and `Episode` is cut the same way (200 characters for titles, 2000 for overviews). |
-| Extra item fields | All optional; a wrong one is ignored, not the item. `genres` at most 5, each at most 30 characters; `badges` (shown as chips, e.g. `"HD"`, `"Latino"`) at most 3 of at most 20; `rating` from 0 to 10; `runtimeMinutes` from 1 to 1000; `ids.tmdb` a positive integer (Kino uses it to match your title with TMDB and to find it again from search); `ids.imdb` matches `^tt\d{5,10}$`. An episode's `airDate` is `YYYY-MM-DD`. |
+| Extra item fields | All optional; a wrong one is ignored, not the item. `genres` at most 5, each at most 30 characters; `badges` (shown as chips, e.g. `"HD"`, `"Latino"`) at most 3 of at most 20; `rating` from 0 to 10; `runtimeMinutes` from 1 to 1000; `ids.tmdb` a positive integer (Kino uses it to match your title with TMDB, to find it again from search, and to enrich its info page -- see below); `ids.imdb` matches `^tt\d{5,10}$` (also enriches a movie's info page when you have no `ids.tmdb`). An episode's `airDate` is `YYYY-MM-DD`. |
 | `adult` | An item with `adult: true` is dropped: Kino has no place behind its 18+ lock for plugin titles yet. |
 | Images | `poster`, `backdrop` and `still` must be `https` URLs of at most 2048 characters, or they are ignored. Images are loaded by Kino directly and are **not** checked against `hosts` (they are display only), and Kino does not send your headers or cookies with them. This is the one exception to the host rule, with one limit: an image on an IP address or a local name (`localhost`, `.local`, `.lan`, …) is ignored too, unless it is on a server the person typed in your settings (then `http` works too). |
+
+**`ids.tmdb` enriches the info page, not only matching.** When TMDB has this exact title (matched by
+`ids.tmdb`, or by `ids.imdb` on a movie when you gave no `ids.tmdb`), opening it adds three kinds of
+field, each filled in differently:
+
+- **Only TMDB has these, so they always come from it:** a tagline, the director or (for a series)
+  creator, the cast and the age rating.
+- **TMDB wins whenever it has an answer; yours is only the fallback for what TMDB left blank:** the
+  year and the genres. A title with its own year or genres still shows TMDB's once matched, not its
+  own.
+- **Yours wins when you gave one; TMDB only fills the gap:** the synopsis (only replaced if yours was
+  empty), the rating (only if you left it out), and a movie's runtime (only if you left it unset --
+  a series' runtime is never touched either way, TMDB's included; it prints per episode, not for the
+  whole show).
+
+It does **not** add a poster, a backdrop or seasons from TMDB -- those stay exactly what your
+`Item`/`SeriesInfo`/`episodes` answer gave, or blank if you left them out.
 
 **The `Stream` rules.**
 
 - `url` must be `https` and its host must be one of your `hosts`, and so must the host of every
   subtitle URL, or it must be on a server the person typed in your settings (exactly that scheme,
-  host and port). A stream that breaks this is refused as a whole; a bad subtitle is dropped and the
+  host and port). The one other way to plain `http` is a host you declared
+  `{ "host": "…", "insecureHttp": true }` (apiVersion 2, [above](#declaring-an-insecure-host-apiversion-2)):
+  that host, exactly, accepts `http` for the stream, its subtitles, its audio tracks and its
+  license. A stream that breaks this is refused as a whole; a bad subtitle is dropped and the
   stream still plays.
 - `mime` is optional, of the form `video/mp4` (anything else refuses the stream). When it is missing
   Kino's player detects HLS, DASH or a plain file from the URL and the content.
 - **Everything the player fetches for the stream follows the `kino.fetch` host rules.** That covers the
   `url` itself, the variants, segments and `#EXT-X-KEY` keys an HLS manifest names, the `BaseURL`s of a
   DASH manifest, the subtitles, and every redirect hop of any of them: each must be `https` on one of
-  your `hosts`, never an IP address or a local name, and a declared name that resolves inside the
-  person's own network is refused. A request that breaks this fails before it leaves the device and
+  your `hosts` (or `http` on one you declared `insecureHttp`), never an IP address or a local name,
+  and a declared name that resolves inside the person's own network is refused. A request that breaks this fails before it leaves the device and
   playback stops with an error, so a manifest that points at another CDN needs that CDN in `hosts`.
 - `headers` are sent with every one of those player requests (the stream, its manifest's segments and
-  keys, its subtitles, and redirect hops, all on your `hosts`), and nowhere else. At most 20; names are letters, digits and
+  keys, its subtitles, and redirect hops, all on your `hosts`) and, if you declare `download`, with
+  the request that saves the stream to the device — and nowhere else. At most 20; names are letters, digits and
   hyphens; values are at most 4096 characters with no line breaks; `Host`, `Content-Length`,
   `Transfer-Encoding` and `Connection` are ignored.
 - `subtitles`: at most 30, each `{ lang, url, format? }`. `lang` is a short language code such as
   `"es"` (up to 20 characters; blank becomes `"und"`), `format` is `"vtt"` or `"srt"`.
+- `audioTracks`: at most 8, each `{ lang, url, label? }` -- a dub or an alternate mix your source
+  serves as its own file, separate from the video. Checked exactly like a subtitle: `url` must be
+  `https` on a declared host, or the person's own server exactly as typed; a bad entry is dropped and
+  the rest of the stream still plays. `lang` up to 16 characters (blank becomes `"und"`); `label`, up
+  to 40 characters, is shown in the audio menu verbatim when given, instead of a name guessed from
+  `lang`. Kino merges each one into the video and offers it, auto-picked by the person's audio
+  preference, in the same menu as the container's own embedded tracks. A stream with no `audioTracks`
+  plays exactly as it always has. Example, a source that dubs into two languages:
+  ```js
+  return {
+    url: videoUrl,
+    audioTracks: [
+      { lang: "es-419", url: dubUrl("es"), label: "Español (Latinoamérica)" },
+      { lang: "en", url: dubUrl("en") },
+    ],
+  };
+  ```
 - `durationMs` is optional, in milliseconds.
 - `expiresInSeconds` (30 to 86400) says when your URL may stop working. If playback fails after that
   long, Kino calls `resolve` once more and continues where the person was.
-- **No DRM.** A stream carrying any of `drm`, `license`, `licenseUrl`, `drmLicenseUrl`, `keySystem` or
-  `widevine` is refused.
+- **DRM only when declared.** A stream carrying any of `drm`, `license`, `licenseUrl`, `drmLicenseUrl`,
+  `keySystem` or `widevine` is refused ("El video tiene DRM y los plugins no lo soportan") -- unless
+  your manifest declares the `drm` capability (apiVersion 2) and the only such key is a `drm` block
+  `{ type: "widevine", licenseUrl, licenseHeaders? }`: then Kino plays it as Widevine. `licenseUrl`
+  is checked exactly like `url` (https on one of your `hosts`, or the person's own server), and
+  `licenseHeaders` are filtered like `headers` (at most 20) and sent with the license request only.
+  The other five keys are refused even next to a valid `drm` block. See
+  [A Widevine-protected stream](#a-widevine-protected-stream-apiversion-2).
 
 ### Errors people understand
 
@@ -372,7 +535,7 @@ unknown code becomes a plain error.
 `kino` is a global object, frozen, always there. Nothing else from the outside world is.
 
 ```js
-kino.apiVersion   // 1
+kino.apiVersion   // 2 -- the highest apiVersion this build of Kino understands, not your manifest's
 kino.appVersion   // the version of Kino, for example "1.42.0"
 kino.lang         // "es-CO"
 ```
@@ -412,7 +575,8 @@ seconds of your call's time. Ask for the form the content is.
 - **https only, and only your hosts.** The host of the request and of **every redirect hop** must
   match `hosts` (`*.x` matches subdomains of `x`, not `x`), or be a server the person typed in your
   settings, exactly as typed. A request to anything else fails before it leaves the device. An `http`
-  URL on a declared host fails too. An IP address or a local name (`localhost`, `.local`, …) is always
+  URL on a declared host fails too, unless you declared that host `{ "host": "…", "insecureHttp": true }`
+  (apiVersion 2, [section 3](#declaring-an-insecure-host-apiversion-2)). An IP address or a local name (`localhost`, `.local`, …) is always
   refused unless the person typed it. Kino also refuses a declared name that resolves to an address
   inside the person's own network (loopback, private, link-local, carrier-grade NAT, multicast).
 - **Redirects** (301, 302, 303, 307, 308) are followed by Kino, up to 10 hops; each hop is checked
@@ -424,7 +588,7 @@ seconds of your call's time. Ask for the form the content is.
 <!-- contract:fetchErrors:start -->
 | `e.code` | When |
 | --- | --- |
-| `host_not_allowed` | the host (or a redirect hop) is not one you declared or the person typed, or it is `http` on a declared host |
+| `host_not_allowed` | the host (or a redirect hop) is not one you declared or the person typed, or it is `http` on a declared host not marked `insecureHttp` |
 | `timeout` | no complete answer within `timeoutMs` |
 | `network` | the connection failed, or too many redirects |
 | `too_large` | the request over the size cap, or a body over 5 MB |
@@ -510,10 +674,11 @@ exists only inside Kino**: the Node kit's version throws, so test anything that 
 ### `kino.storage`
 
 ```js
-kino.storage.get("key")        // the string, or null
-kino.storage.set("key", "v")   // values are converted to strings
+kino.storage.get("key")                          // the string, or null
+kino.storage.set("key", "v")                     // values are converted to strings
+kino.storage.set("key", "v", { ttlMs: 3600000 }) // expires after that many milliseconds
 kino.storage.remove("key")
-kino.storage.keys()            // every key, as an array
+kino.storage.keys()                              // every key, as an array (expired keys are already gone)
 ```
 
 Synchronous, private to your plugin, and it survives restarts of the sandbox and of the app. At most
@@ -521,11 +686,89 @@ Synchronous, private to your plugin, and it survives restarts of the sandbox and
 `Error("almacenamiento del plugin lleno (256 KB)")`. It is deleted when the person uninstalls the
 plugin, and it is **not** cleared when they change your settings.
 
+`set`'s third argument is optional: leave it out for a permanent entry, exactly as before this option
+existed. Give `{ ttlMs }` to make the entry expire -- after that many milliseconds `get` returns `null`
+and `keys()` no longer lists it, even across a restart of the app. `ttlMs` must be a whole number
+greater than 0 and at most 2,592,000,000 (30 days); anything else throws before your entry is
+touched, the same way an oversized value already does. An expired entry never counts against the
+256 KB cap: it is dropped the next time your plugin reads or writes storage. Example, a Home row
+cached for an hour:
+
+```js
+export async function home() {
+  const cached = kino.storage.get("home-rows");
+  if (cached) return JSON.parse(cached);
+  const rows = await buildHomeRows();
+  kino.storage.set("home-rows", JSON.stringify(rows), { ttlMs: 60 * 60 * 1000 });
+  return rows;
+}
+```
+
 ### `kino.log(...args)`
 
 Also `console.log`, `console.info`, `console.warn` and `console.error`: they all go to the log
 (tag `KinoPlugin` in `adb logcat`), objects are written as JSON, and a message is cut at 2000
 characters. Under the Node kit they go to stderr.
+
+### `kino.rank`
+
+For a search backend that only matches a loose bag of shared words rather than a title as a whole:
+asking it a long title can return twenty unrelated results that merely share one common word, with
+the real match buried on page two. These three pure functions make a backend like that behave like a
+title search, without touching its own JSON shape.
+
+```js
+kino.rank.shortQuery(query)
+kino.rank.sortBySimilarity(items, query, getTitle?)
+kino.rank.filterRelevant(items, query, getTitle?)
+```
+
+- **`shortQuery(query)`** returns the title's HEAD, up to its first `:`, `,`, `|`, en dash or em
+  dash: ask your backend that instead of the whole title, so its own ranking has less noise to sort
+  through. A one- or two-letter head ("El", "A") identifies nothing, so the whole (trimmed) text
+  comes back instead; a plain `-` is never a cut point (it would split "Spider-Man"). Try it against
+  your backend first -- some do worse with a short query, not better.
+- **`sortBySimilarity(items, query, getTitle?)`** reorders `items` so the ones sharing the most words
+  with `query` come first; ties keep the backend's own order.
+- **`filterRelevant(items, query, getTitle?)`** drops items that only share a stray word with
+  `query`. Reordering alone still shows a full page of near-misses when the title genuinely is not on
+  the backend; this makes an absent title come back with 0 results instead.
+
+`query` is a title, or an array of several forms of one worth trying together --
+`[query.q, query.originalTitle, ...query.altTitles]`, since a backend may only know a title in one
+language. `getTitle` reads a title off one of your own `items`; it defaults to
+`(item) => item.title`, and may itself return an array the same way `query` can, when an item keeps
+a title in more than one field or language (every form's words are combined). Matching folds accents
+and case and ignores words of 1-2 letters (the "el", "de", "of" that make unrelated titles look
+alike); `filterRelevant` keeps an item once it shares at least 60% of a requested title's distinctive
+words.
+
+**Bad input never throws.** Unlike `kino.fetch`/`kino.crypto`/`kino.sleep`, these three never raise a
+`kino.error` for a malformed argument: `items` that is not an array answers `[]` from either
+function. An item with no usable title -- `null`, `undefined`, `getTitle` returning something that is
+not a string (or an array with none in it), or `getTitle` itself throwing -- is treated as "no title"
+rather than crashing your call: `filterRelevant` drops it like an actual near-miss, and
+`sortBySimilarity` sorts it after every item that does have one, in your list's own order among
+themselves.
+
+```js
+export async function search(query) {
+  const titles = [query.q, query.originalTitle, ...query.altTitles];
+  const r = await kino.fetch(BASE + "/search?q=" + encodeURIComponent(kino.rank.shortQuery(query.q)));
+  const found = r.json().results; // whatever shape your backend answers with
+  const relevant = kino.rank.filterRelevant(found, titles, (x) => x.name);
+  return kino.rank.sortBySimilarity(relevant, titles, (x) => x.name).map(toItem);
+}
+```
+
+If your backend already ranks a full title well, skip `shortQuery` and run only
+`filterRelevant`/`sortBySimilarity`, on what it gives you for `query.q` as typed.
+
+Two things left out on purpose. Neither retries with the full title: if `shortQuery`'s head happens
+to be a common word (e.g. "Love, Death & Robots" -> "Love") and the backend returns nothing relevant
+for it, retry `search` with the full title yourself when the short one comes back empty. And neither
+does anything with season numbers or ordering: how a backend spells "season 2" in its own titles
+("T2", "Temporada 2", …) is specific to that backend, not something these can fold in.
 
 ## 6. Limits and engine quirks
 
@@ -540,14 +783,14 @@ characters. Under the Node kit they go to stderr.
 | Loading the module (its top level) | 10 s |
 | Idle sandbox | closed after 5 minutes without calls |
 | Consecutive timeouts | 3 in a row and Kino disables the plugin ("No responde") |
-| `kino.fetch` | https only (or the person's own server as typed); 15 s default, 30 s maximum; response body at most 5 MB; the request (URL, headers and body) at most 1,048,576 characters; at most 60 requests per call; at most 10 redirects per request |
+| `kino.fetch` | https only (or the person's own server as typed, or `http` on a host declared `insecureHttp`); 15 s default, 30 s maximum; response body at most 5 MB; the request (URL, headers and body) at most 1,048,576 characters; at most 60 requests per call; at most 10 redirects per request |
 | Cookies | 50 per domain, 64 KB in total per plugin |
-| `kino.storage` | 256 KB per plugin |
+| `kino.storage` | 256 KB per plugin; an entry's optional `ttlMs` is 1..2,592,000,000 ms (30 days) |
 | `kino.sleep` | 0 to 5,000 ms per call |
 | `kino.crypto` | data at most 5 MB per call; PBKDF2 at most 100,000 iterations and 64-byte keys; `randomBytes` at most 1,024 |
 | `kino.log` / `console.*` | 2,000 characters per message |
 | What a function returns | at most 2,000,000 characters once turned into JSON |
-| Results | `search` 100 items; `home` 20 rows of 60; `browse` 100 per page; `episodes` 5,000; `ref` 4,096 characters; `next` 2,048 characters; `id` matches `^[A-Za-z0-9._~-]{1,128}$` |
+| Results | `search` 100 items; `home` 20 rows of 60; `browse` 100 per page; `episodes` 5,000 (and 50 `seasons`); `ref` 4,096 characters; `next` 2,048 characters; `id` matches `^[A-Za-z0-9._~-]{1,128}$` |
 | Settings | at most 12; `text` 500, `url` 2,048, `password` 500 characters |
 | Error messages | your `kino.error` message is shown as a detail, cut at 200 characters |
 | `hosts` | 1 to 20 entries |
@@ -722,9 +965,10 @@ differences:
    lower number is treated as "already up to date", so a fix without a version bump never reaches
    anyone). Kino checks for updates at most once a day per plugin, and when the person taps
    "Buscar actualización".
-   - If the new version does not add anything to `hosts` or `permissions` and needs a supported
-     `apiVersion`, it is installed silently.
-   - If `hosts` or `permissions` grow, Kino does **not** apply it: the plugin shows "Actualización
+   - If the new version does not add anything to `hosts`, `permissions`, `download`, `drm` or an
+     `insecureHttp` host, and needs a supported `apiVersion`, it is installed silently.
+   - If `hosts` or `permissions` grow, or the manifest newly declares `download`, `drm`, or marks an
+     already-approved host `insecureHttp`, Kino does **not** apply it: the plugin shows "Actualización
      disponible — requiere tu aprobación" and the person sees the new ones (marked "nuevo") before
      accepting. Removing them needs no approval.
    - A new **required** setting does not block the update: it installs and the plugin shows "Falta
@@ -753,8 +997,10 @@ Before you publish, check that:
   and author, the description, the list of hosts under "Se va a conectar con:", and the warning
   "Plugin no verificado: solo instálalo si confías en quien lo hizo." with "Instalar" and "Cancelar".
   If your manifest has a `password` setting it adds "Este plugin usa tu usuario y contraseña"; a `url`
-  setting adds "Se conectará a los servidores que escribas en su configuración". Nothing of yours
-  runs before they accept.
+  setting adds "Se conectará a los servidores que escribas en su configuración". Declaring `download`
+  adds "Puede descargar videos para verlos sin conexión", `drm` adds "Reproduce video protegido (DRM)",
+  and each `insecureHttp` host adds, in red, "Conexión sin cifrar con <host>". Nothing of yours runs
+  before they accept.
 - **Configurar.** A plugin with `settings` has a "Configurar" button in Ajustes ▸ Plugins. Until
   every required setting has a value its status is "Falta configurar" and nothing of it runs.
 - **Ver más.** A Home row with a `ref` ends in a "Ver más" card, and a search page with a `next`
@@ -762,8 +1008,11 @@ Before you publish, check that:
   person scrolls.
 - **Search, Home and the library.** Your results appear in search under your plugin's name (with your
   `color`), next to the app's own sources; your `home` rows appear on Home after the app's own; your
-  titles play in Kino's player and appear in "Continuar viendo" and the library. Not available for
-  plugin titles in this version: downloads, Chromecast and DLNA.
+  titles play in Kino's player and appear in "Continuar viendo" and the library. Titles of a plugin
+  that declares `download` can be saved for offline viewing ([section 3](#downloads-apiversion-2));
+  Chromecast and DLNA are not available for plugin titles in this version. A `live` item's card
+  says "EN VIVO" and plays on tap, with no info page; a channel never enters "Continuar viendo" or
+  the library ([Live channels](#live-channels-apiversion-2)).
 - **Status of each plugin** in Ajustes > Plugins: "Activo", "Desactivado", "Falta configurar", "No
   responde — actívalo para volver a intentar" (three timeouts in a row; the person can re-enable it),
   "Actualización
@@ -774,6 +1023,7 @@ Before you publish, check that:
   files, its storage and its cached Home rows immediately, but keeps the person's library titles and
   progress: opening one says "Esto venía del plugin <name>, que ya no está instalado", and installing
   the plugin again restores them. That is one more reason to keep `id` and `ref` handling stable.
+  Titles already downloaded keep playing offline and can be removed from Descargas.
 
 ## 10. The reference plugin
 
@@ -806,9 +1056,9 @@ episodes numbered 0 are dropped), so do not copy those as intended behavior.
 
 ## 11. Cookbook
 
-Three complete shapes, and one smaller helper for a `search` you already have. The first and third
-full shapes are, nearly line for line, the two reference plugins Kino's own tests run end to end
-against a fake server.
+Three complete shapes, then two short recipes for the apiVersion 2 powers that need a line on the
+consent sheet. The first and the third shapes are, nearly line for line, the two reference plugins
+Kino's own tests run end to end against a fake server.
 
 ### An HTML site with a login and hidden links
 
@@ -1011,137 +1261,101 @@ export async function resolve(ref) {
 Try it under Node with `--config server=http://192.168.1.10:8096 --config user=ana --config
 password=…` (or `sdk/config.json`, kept out of git).
 
-### A search backend that matches by loose shared words, not by title
+### A Widevine-protected stream (apiVersion 2)
 
-Some backends do not really search by title: they match a query against a loose bag of shared
-words, so a long title comes back buried under a wall of anything that happens to share one common
-word with it. Asking a backend like that for "The Lost City of Z: A Legend" can return twenty
-unrelated titles that merely share "lost" or "legend", with the real match on page two; asking it
-just "Lost City" often ranks the whole family well, with the title you want near the top.
+Your source serves DASH or HLS encrypted with Widevine and hands out a license from its own server.
+Declare `"apiVersion": 2` and `"drm"` in `capabilities`, list the license server in `hosts`, and
+return a `drm` block with the `Stream`:
 
-Three small, pure functions fix this without touching your backend's own JSON shape — you tell them
-how to read a title from whatever your backend returns with `titleOf(item)`:
-
-- **`shortQuery(q)`** — ask the backend the title's HEAD (up to its first `:`, `,`, `|`, en dash or
-  em dash) instead of the whole thing, so its own ranking has less noise to sort through. Try it
-  against your backend first: some backends do worse with a short query, not better.
-- **`sortBySimilarity(items, titles, titleOf)`** — reorders what came back so the ones sharing the
-  most words with `titles` (the forms you actually asked for — `query.q`, `query.originalTitle` and
-  `query.altTitles` are all worth trying, since a backend may only know a title in one language)
-  come first. Ties keep the backend's own order.
-- **`filterRelevant(items, titles, titleOf)`** — drops hits that only share a stray word.
-  Reordering alone still shows a full page of near-misses when the title genuinely is not on the
-  backend; this makes an absent title come back with 0 results instead.
-
-```js
-// Fixes a backend whose search only matches loose shared words, not the title as a whole: ask it a
-// short query, then rank and filter what it returns by how many words it actually shares with what
-// was asked. None of this touches your backend's own JSON shape — you tell each function how to
-// read a title with `titleOf(item)` (it may also return an array, if your backend keeps a title in
-// more than one field or language: their tokens are unioned).
-
-// Words of 3+ letters, folded to plain lowercase ascii. 1-2 letter words ("el", "de", "a", "of")
-// are dropped: they are exactly what makes unrelated titles look alike.
-
-// NFKD decomposes an accented letter into its plain letter plus a separate combining mark (e.g.
-// "ã" -> "a" + U+0303); stripping the marks folds every decomposable Latin accent at once, the same
-// way Kotlin's own java.text.Normalizer-based folding does. `.normalize` is feature-detected, not
-// assumed, because this recipe also runs inside Kino's own sandboxed JS engine: the manual table
-// below is the fallback for an engine where `.normalize` is missing, and it only needs to cover the
-// accents it's likely to meet, not be exhaustive.
-const FOLD_ACCENTS = {
-  á: "a", à: "a", ä: "a", â: "a", ã: "a", å: "a", é: "e", è: "e", ë: "e", ê: "e",
-  í: "i", ì: "i", ï: "i", î: "i", ó: "o", ò: "o", ö: "o", ô: "o", õ: "o",
-  ú: "u", ù: "u", ü: "u", û: "u", ñ: "n", ç: "c",
-};
-
-function foldAccents(text) {
-  if (typeof text.normalize === "function") {
-    return text.normalize("NFKD").replace(/[\u0300-\u036f]/g, "");
-  }
-  return text.replace(/[áàäâãåéèëêíìïîóòöôõúùüûñç]/g, (c) => FOLD_ACCENTS[c]);
-}
-
-function titleTokens(text) {
-  const plain = foldAccents(String(text || "").toLowerCase());
-  return new Set((plain.match(/[a-z0-9]+/g) || []).filter((w) => w.length > 2));
-}
-
-function tokensOf(titleOf, item) {
-  const tokens = new Set();
-  for (const form of [].concat(titleOf(item))) for (const t of titleTokens(form)) tokens.add(t);
-  return tokens;
-}
-
-function sharedCount(a, b) {
-  let n = 0;
-  for (const t of a) if (b.has(t)) n++;
-  return n;
-}
-
-// The items that share the most words with any of `titles` go first; ties keep the order the
-// backend gave them in (stable).
-function sortBySimilarity(items, titles, titleOf) {
-  const requested = titles.map(titleTokens).filter((t) => t.size > 0);
-  if (requested.length === 0) return items;
-  return items
-    .map((item, index) => {
-      const ofItem = tokensOf(titleOf, item);
-      return { item, index, score: Math.max(...requested.map((r) => sharedCount(r, ofItem))) };
-    })
-    .sort((a, b) => b.score - a.score || a.index - b.index)
-    .map((x) => x.item);
-}
-
-// Minimum share of a requested title's distinctive words an item must carry to count as a real
-// match (0.6 = "most of them").
-const MIN_RELEVANCE = 0.6;
-
-// Reordering alone (sortBySimilarity) still leaves a page of near-misses when the title genuinely
-// isn't on the backend; this drops them, so an absent title comes back with 0 results instead.
-function filterRelevant(items, titles, titleOf) {
-  const forms = titles.map(titleTokens).filter((t) => t.size > 0);
-  if (forms.length === 0) return items;
-  return items.filter((item) => {
-    const ofItem = tokensOf(titleOf, item);
-    return forms.some((form) => sharedCount(form, ofItem) / form.size >= MIN_RELEVANCE);
-  });
-}
-
-// Ask a loose-matching backend the title's HEAD, not the whole thing: a long title returns
-// everything that shares one common word with it, drowning the real match; the head alone keeps
-// the backend's own ranking useful. A one- or two-letter head ("El", "A") identifies nothing, so
-// the whole text is used instead. Not a plain "-": that would cut inside a hyphenated word like
-// "Spider-Man".
-function shortQuery(q) {
-  const text = String(q || "").trim();
-  const head = text.split(/[:,|–—]/)[0].trim();
-  return head.length >= 3 ? head : text;
+```json
+{
+  "id": "mi-servicio", "name": "Mi servicio", "version": "1.0.0", "apiVersion": 2, "entry": "plugin.js",
+  "hosts": ["api.example.com", "cdn.example.com", "license.example.com"],
+  "capabilities": ["search", "resolve", "drm"]
 }
 ```
 
-Wire it into `search`:
-
 ```js
-export async function search(query) {
-  const titles = [query.q, query.originalTitle, ...query.altTitles].filter(Boolean);
-  const r = await kino.fetch(BASE + "/search?q=" + encodeURIComponent(shortQuery(query.q)));
-  const found = r.json().results; // whatever shape your backend answers with
-  const relevant = filterRelevant(found, titles, (x) => x.name);
-  return sortBySimilarity(relevant, titles, (x) => x.name).map(toItem);
+export async function resolve(ref) {
+  const s = await api("/play/" + encodeURIComponent(ref)); // { mpd, licenseToken }
+  return {
+    url: s.mpd, // https://cdn.example.com/…/manifest.mpd
+    mime: "application/dash+xml",
+    drm: {
+      type: "widevine",
+      licenseUrl: "https://license.example.com/widevine",
+      licenseHeaders: { Authorization: "Bearer " + s.licenseToken },
+    },
+    expiresInSeconds: 3600,
+  };
 }
 ```
 
-If your backend already ranks a full title well, skip `shortQuery` and only run
-`filterRelevant`/`sortBySimilarity` on what it gives you for `query.q` as typed: the two matter on
-their own, and the short query is only there to give a loose-matching backend less to search
-through in the first place.
+What Kino does with it, and what it does not:
 
-Two things this recipe leaves out on purpose. It never retries with the full title: if
-`shortQuery`'s head happens to be a common word (e.g. "Love, Death & Robots" → "Love") and the
-backend returns nothing relevant for it, that gap is yours to close — retry `search` with the full
-title yourself when the short one comes back empty. And it does nothing with season numbers or
-ordering: how a backend spells "season 2" in its own titles ("T2", "Temporada 2", …) is specific to
-that backend, not a general pattern this recipe can fold in.
+- `licenseUrl` must pass the same check as `url`: `https` on one of your `hosts` (or the person's own
+  server as typed), never an IP or a local name; the license request itself goes through the same
+  host gate as the segments, with `licenseHeaders` (filtered like `headers`, at most 20) on it and
+  nothing else. `headers` are not sent to the license server, and `licenseHeaders` are not sent to
+  the CDN.
+- `type` must be `"widevine"`: PlayReady, FairPlay and ClearKey are not offered. Without the `drm`
+  capability, or with any other DRM-shaped key (`license`, `licenseUrl`, `drmLicenseUrl`, `keySystem`,
+  `widevine`) in the `Stream`, the stream is refused as it always was.
+- Kino asks Widevine for security level **L3** (software) so the same player, surface and decoder
+  as a clear stream are used, and plays **only if the device confirms L3**: a device that stays at
+  L1 (or won't say) opens no session at all and shows the message below. A license server that
+  refuses L3, or grants it only SD, gives the person SD or that same message: check your server's
+  policy before you ship.
+- `audioTracks` next to `drm`: the video is protected, the side audio files are played **clear** --
+  no license is requested for them, so they must be plain, unencrypted files (an encrypted side
+  file fails the whole playback with the message below). `subtitles` and `headers` work as always.
+- When the license is refused, unreachable or expired, or the device has no Widevine (or no L3), the
+  person reads "No se pudo abrir este video protegido" (after one more `resolve` if `expiresInSeconds`
+  had passed, like any stream). A protected title is **never downloadable** ("Este video no se puede
+  descargar"), even with `download` declared, and cannot be sent to a Chromecast (no plugin title can).
+- The consent sheet adds "Reproduce video protegido (DRM)" when `drm` is declared, and an update that
+  newly declares it waits for the person's approval ([section 8](#8-publishing-your-plugin)).
 
-Tested at `sdk/test/cookbook-ranking.test.mjs` (`node --test sdk/test/cookbook-ranking.test.mjs`).
+To test without a real service, a public Widevine test stream works: the manifest at
+`https://storage.googleapis.com/wvmedia/cenc/h264/tears/tears.mpd` with the license server
+`https://proxy.uat.widevine.com/proxy?provider=widevine_test` (declare `storage.googleapis.com` and
+`proxy.uat.widevine.com` in `hosts`; no `licenseHeaders` needed).
+
+### A site of yours without a certificate (apiVersion 2)
+
+Your videos sit on a server of yours that only speaks plain `http` -- a CDN box with no certificate,
+an old media server on a public name. Declare `"apiVersion": 2` and mark that one host
+`insecureHttp` in `hosts`; nothing changes in your code beyond the scheme:
+
+```json
+{
+  "id": "mi-cdn", "name": "Mi CDN", "version": "1.0.0", "apiVersion": 2, "entry": "plugin.js",
+  "hosts": ["api.example.com", { "host": "cdn.example.com", "insecureHttp": true }],
+  "capabilities": ["search", "resolve"]
+}
+```
+
+```js
+export async function resolve(ref) {
+  const s = await api("/play/" + encodeURIComponent(ref)); // over https, api.example.com
+  return {
+    url: "http://cdn.example.com/videos/" + s.file,           // plain http: only because cdn.example.com is insecureHttp
+    subtitles: s.subs.map((x) => ({ lang: x.lang, url: "http://cdn.example.com/subs/" + x.file })),
+  };
+}
+```
+
+What the flag does, and what it does not:
+
+- Only `cdn.example.com`, exactly, accepts `http`: for `kino.fetch`, a `Stream`'s `url`, `subtitles`,
+  `audioTracks` and a `drm` block's `licenseUrl`, and for every redirect hop that lands on it.
+  `api.example.com` stays https-only, and so does `sub.cdn.example.com` (no wildcard, no subdomains).
+  `https://cdn.example.com/…` keeps working too.
+- Everything else about a declared host holds: a public DNS name (no IP, no `localhost`, nothing
+  `.local`/`.lan`), and a name that resolves into the person's own network is refused at request
+  time. For a server at home the person types in a `url` setting instead (see
+  [The person's own server](#the-persons-own-server)): that path takes `http` without this flag.
+- The consent sheet adds, in red, "Conexión sin cifrar con cdn.example.com", so the person knows
+  that traffic can be read on the way; an update that newly marks an already-approved host
+  `insecureHttp` waits for approval ([section 8](#8-publishing-your-plugin)). Prefer `https` whenever
+  the server can: the flag is for the host that cannot.

@@ -4,12 +4,13 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { createServer } from "node:http";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { checkOutput, contract, validateManifest } from "../contract.mjs";
 import { createKino } from "../kino-shim.mjs";
+import { filterRelevant, shortQuery, sortBySimilarity } from "../kino-rank.mjs";
 import { validate } from "../validate.mjs";
 import { scaffold } from "../init.mjs";
 import { call } from "../run.mjs";
@@ -24,8 +25,9 @@ const manifest = (extra = {}) => JSON.stringify({
 });
 
 test("contract.json is the one the app pins", () => {
-  assert.equal(contract.apiVersion, 1);
-  assert.deepEqual(contract.capabilities.names, ["search", "home", "browse", "episodes", "resolve"]);
+  assert.equal(contract.apiVersion, 2);
+  assert.deepEqual(contract.capabilities.names, ["search", "home", "browse", "episodes", "resolve", "download", "drm"]);
+  assert.deepEqual(contract.capabilities.declarative, ["download", "drm"]);
   assert.deepEqual(contract.permissions, []);
 });
 
@@ -40,7 +42,12 @@ test("manifest rules and Spanish messages match the app", () => {
     [{ settings: [{ key: "k", label: "x", type: "url", default: "http://192.168.1.1" }] }, "settings", 'El ajuste "k" de tipo url no puede tener valor por defecto: usa "hint"'],
     [{ settings: [{ key: "k", label: "x", type: "url", default: "" }] }, "settings", 'El ajuste "k" de tipo url no puede tener valor por defecto: usa "hint"'],
     [{ capabilities: ["search"] }, "capabilities", 'El plugin debe declarar "resolve"'],
+    [{ capabilities: ["search", "resolve", "download"] }, "capabilities", "Esta capacidad necesita apiVersion 2"],
+    [{ capabilities: ["search", "resolve", "drm"] }, "capabilities", "Esta capacidad necesita apiVersion 2"],
     [{ hosts: ["192.168.1.1"] }, "hosts", 'El dominio "192.168.1.1" no está permitido'],
+    [{ hosts: [{ host: "x.example.com", insecureHttp: true }] }, "hosts", 'Un host con "insecureHttp" necesita apiVersion 2'],
+    [{ apiVersion: 2, hosts: [{ host: "*.example.com", insecureHttp: true }] }, "hosts", 'Un host con "insecureHttp" no puede tener comodín ("*.")'],
+    [{ apiVersion: 2, hosts: [{ host: "nas.local", insecureHttp: true }] }, "hosts", 'El dominio "nas.local" no está permitido'],
     [{ id: "magis" }, "id", 'El id "magis" está reservado por Kino'],
     // The app's version regex bounds each segment to 6 digits (Regex("^(0|[1-9]\\d{0,5})...")); a
     // hand-typed unbounded copy would wrongly accept this.
@@ -50,6 +57,30 @@ test("manifest rules and Spanish messages match the app", () => {
     assert.deepEqual(validateManifest(manifest(extra)), { ok: false, field, message }, JSON.stringify(extra));
   }
   assert.equal(validateManifest(manifest({ permissions: ["x"] }), { knownPermissions: ["x"] }).ok, true);
+});
+
+test("apiVersion 2: download/drm and an insecureHttp host validate and are exposed on the manifest", () => {
+  const r = validateManifest(manifest({
+    apiVersion: 2,
+    hosts: ["archive.org", { host: "x.example.com", insecureHttp: true }],
+    capabilities: ["search", "resolve", "download", "drm"],
+  }));
+  assert.equal(r.ok, true);
+  assert.deepEqual(r.manifest.hosts, ["archive.org", "x.example.com"]);
+  assert.deepEqual(r.manifest.insecureHosts, ["x.example.com"]);
+  assert.deepEqual(r.manifest.capabilities, ["search", "resolve", "download", "drm"]);
+});
+
+test("validate() does not require download/drm to be exported functions", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "kino-declarative-"));
+  try {
+    writeFileSync(join(dir, "kino-plugin.json"), manifest({ apiVersion: 2, capabilities: ["search", "resolve", "download", "drm"] }));
+    writeFileSync(join(dir, "plugin.js"), "export async function search(){ return [] }\nexport async function resolve(){ return { url: 'https://example.com/a' } }");
+    const r = await validate(dir);
+    assert.deepEqual(r.problems, []);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 test("the archive-org plugin passes the kit's checks", async () => {
@@ -132,6 +163,197 @@ test("config, storage keys, typed errors and sleep", async () => {
   assert.equal(e.message.length, 200);
   assert.equal(kino.error("NOPE", "m").code, "unknown");
   await assert.rejects(kino.sleep(6000), (err) => err.code === "invalid_request");
+});
+
+test("kino.storage entries with a ttlMs expire, are purged, and old data keeps working", () => {
+  const dir = mkdtempSync(join(tmpdir(), "kino-storage-"));
+  const storageFile = join(dir, "storage.json");
+  try {
+    // Data written before ttlMs existed: a bare string per key, no wrapper at all.
+    writeFileSync(storageFile, JSON.stringify({ legacy: "still here" }));
+    const m = JSON.parse(manifest());
+    const opened = () => createKino(m, { storageFile }).kino;
+
+    let kino = opened();
+    assert.equal(kino.storage.get("legacy"), "still here");
+    kino.storage.set("temp", "v", { ttlMs: 1000 });
+    assert.equal(kino.storage.get("temp"), "v");
+    assert.deepEqual(kino.storage.keys().sort(), ["legacy", "temp"]);
+    kino.storage.set("permanent", "p"); // no options: unaffected, exactly as before.
+
+    // Move "temp" into the past on disk instead of waiting: a fresh instance now sees it expired.
+    const onDisk = JSON.parse(readFileSync(storageFile, "utf8"));
+    onDisk.temp = { v: "v", e: Date.now() - 1 };
+    writeFileSync(storageFile, JSON.stringify(onDisk));
+
+    kino = opened();
+    assert.equal(kino.storage.get("temp"), null);
+    assert.deepEqual(kino.storage.keys().sort(), ["legacy", "permanent"]);
+    // The read purged it: the file no longer carries the expired entry.
+    assert.equal(JSON.parse(readFileSync(storageFile, "utf8")).temp, undefined);
+
+    for (const ttlMs of [0, -1, 1.5, NaN, Infinity, contract.storage.maxTtlMs + 1]) {
+      assert.throws(() => kino.storage.set("bad", "v", { ttlMs }), /ttlMs/, `ttlMs ${ttlMs} must be refused`);
+    }
+    assert.equal(kino.storage.get("bad"), null);
+    kino.storage.set("ok", "v", { ttlMs: contract.storage.maxTtlMs }); // the cap itself is accepted
+    assert.equal(kino.storage.get("ok"), "v");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// Ported from the cookbook this promoted (branch feat/plugin-sdk-ranking-helper), against the
+// shipped kino.rank.* functions rather than a copy-pasted recipe.
+test("kino.rank.shortQuery cuts at the first separator, but never a plain hyphen", () => {
+  assert.equal(shortQuery("Avatar: Aang, El ultimo Maestro Aire"), "Avatar");
+  assert.equal(shortQuery("Movie – Subtitle"), "Movie");
+  assert.equal(shortQuery("Movie — Subtitle"), "Movie");
+  assert.equal(shortQuery("One, Two, Three"), "One");
+  // A one- or two-letter head identifies nothing: the whole text is kept instead.
+  assert.equal(shortQuery("A: The Beginning"), "A: The Beginning");
+  // No separator present at all: the whole (trimmed) text is the head, so it is returned either way.
+  assert.equal(shortQuery("  El Ultimo Refugio  "), "El Ultimo Refugio");
+  // Not a plain "-": it must not cut inside a hyphenated word.
+  assert.equal(shortQuery("Spider-Man: Far From Home"), "Spider-Man");
+  assert.equal(shortQuery(""), "");
+});
+
+test("kino.rank.sortBySimilarity puts the item sharing the most words first, stable on ties", () => {
+  const items = [
+    { name: "Saga of Something Else" }, // shares only "saga": 1
+    { name: "Totally Unrelated Movie" }, // shares nothing: 0
+    { name: "Warrior Saga Legends" }, // shares "warrior", "saga": 2
+    { name: "Dragon Warrior Saga: Special Edition" }, // shares all 3
+  ];
+  const getTitle = (x) => x.name;
+  const sorted = sortBySimilarity(items, "Dragon Warrior Saga", getTitle).map(getTitle);
+  assert.deepEqual(sorted, [
+    "Dragon Warrior Saga: Special Edition",
+    "Warrior Saga Legends",
+    "Saga of Something Else",
+    "Totally Unrelated Movie",
+  ]);
+  // Several forms of the query (a title known in more than one language): the best match of any wins.
+  assert.deepEqual(sortBySimilarity(items, ["Ay", "Dragon Warrior Saga"], getTitle).map(getTitle), sorted);
+  // No requested title carries any 3+ letter token: nothing to rank by, so the order is untouched.
+  assert.deepEqual(sortBySimilarity(items, "Ay", getTitle).map(getTitle), items.map(getTitle));
+  // getTitle defaults to `.title`.
+  const titled = items.map((x) => ({ title: x.name }));
+  assert.deepEqual(sortBySimilarity(titled, "Dragon Warrior Saga").map((x) => x.title), sorted);
+});
+
+test("kino.rank.filterRelevant drops hits that only share a stray word", () => {
+  const items = [
+    { name: "Saga of Something Else" }, // 1 of 3 tokens: 0.33, dropped
+    { name: "Totally Unrelated Movie" }, // 0 of 3: dropped
+    { name: "Warrior Saga Legends" }, // 2 of 3: 0.67, kept
+    { name: "Dragon Warrior Saga: Special Edition" }, // 3 of 3: kept
+  ];
+  const getTitle = (x) => x.name;
+  assert.deepEqual(
+    filterRelevant(items, "Dragon Warrior Saga", getTitle).map(getTitle),
+    ["Warrior Saga Legends", "Dragon Warrior Saga: Special Edition"],
+  );
+  // An absent title: 0 results, not a page of near-misses.
+  assert.deepEqual(filterRelevant(items, "Completely Different Name", getTitle), []);
+});
+
+test("kino.rank: filterRelevant then sortBySimilarity leaves the real match first, the noise gone", () => {
+  const items = [
+    { name: "Saga of Something Else" },
+    { name: "Totally Unrelated Movie" },
+    { name: "Warrior Saga Legends" },
+    { name: "Dragon Warrior Saga: Special Edition" },
+  ];
+  const getTitle = (x) => x.name;
+  const result = sortBySimilarity(filterRelevant(items, "Dragon Warrior Saga", getTitle), "Dragon Warrior Saga", getTitle).map(getTitle);
+  assert.deepEqual(result, ["Dragon Warrior Saga: Special Edition", "Warrior Saga Legends"]);
+});
+
+test("kino.rank: titleTokens folds accents and keeps a word whose only accent is ã or å", () => {
+  // Regression coverage via the public functions: an earlier FOLD_ACCENTS with no ã/å entry fell
+  // outside the word regex and dropped the whole word instead of just leaving an accent on it.
+  const items = [{ title: "São Paulo em Chamas" }, { title: "Unrelated" }];
+  assert.deepEqual(sortBySimilarity(items, "Sao Paulo").map((x) => x.title), ["São Paulo em Chamas", "Unrelated"]);
+  assert.deepEqual(filterRelevant(items, "Sao Paulo").map((x) => x.title), ["São Paulo em Chamas"]);
+});
+
+// Robustness convention (see kino-rank.mjs's own header comment): a bad `items` argument never
+// throws, and neither does a bad title on one entry -- only a coded error crossing a real boundary
+// (kino.fetch, kino.crypto, kino.sleep) does that.
+test("kino.rank: a non-array items answers [] instead of throwing", () => {
+  for (const bad of [null, undefined, "not an array", 42, { title: "x" }]) {
+    assert.deepEqual(sortBySimilarity(bad, "Dragon Warrior Saga"), []);
+    assert.deepEqual(filterRelevant(bad, "Dragon Warrior Saga"), []);
+  }
+});
+
+test("kino.rank: an item with no usable title is dropped by filterRelevant and sorts last in sortBySimilarity", () => {
+  const real = { title: "Dragon Warrior Saga: Special Edition" };
+  const noTitleAtAll = { note: "no title field" };
+  const numericTitle = { title: 7 };
+  const arrayOfJunk = { title: [1, 2, 3] };
+  const items = [null, undefined, noTitleAtAll, numericTitle, arrayOfJunk, real];
+
+  assert.deepEqual(filterRelevant(items, "Dragon Warrior Saga"), [real]);
+
+  const sorted = sortBySimilarity(items, "Dragon Warrior Saga");
+  // The one real match goes first; every title-less item follows, in its original relative order.
+  assert.equal(sorted[0], real);
+  assert.deepEqual(sorted.slice(1), [null, undefined, noTitleAtAll, numericTitle, arrayOfJunk]);
+});
+
+test("kino.rank: a getTitle that throws is treated as a missing title, not a crash", () => {
+  const boom = () => { throw new Error("backend field is missing"); };
+  const real = { title: "Dragon Warrior Saga: Special Edition" };
+  const items = [{ broken: true }, real];
+
+  assert.deepEqual(filterRelevant(items, "Dragon Warrior Saga", boom), []);
+  assert.deepEqual(sortBySimilarity(items, "Dragon Warrior Saga", boom), items);
+});
+
+test("kino.rank: getTitle answering a non-string, or an array with none, is a missing title too", () => {
+  const real = { name: "Dragon Warrior Saga: Special Edition" };
+  const weird = { name: 123 };
+  const mixedArray = { name: [123, null, "Dragon Warrior Saga: Special Edition"] };
+  const getTitle = (x) => x.name;
+
+  assert.deepEqual(filterRelevant([weird], "Dragon Warrior Saga", getTitle), []);
+  // A form buried in an array of junk is still found and used.
+  assert.deepEqual(filterRelevant([mixedArray], "Dragon Warrior Saga", getTitle), [mixedArray]);
+  assert.deepEqual(sortBySimilarity([weird, real], "Dragon Warrior Saga", getTitle), [real, weird]);
+});
+
+test("kino.rank: the shim wires the exact same functions the runtime inlines", () => {
+  const { kino } = createKino(JSON.parse(manifest()));
+  // Same module, not a copy: kino-shim.mjs imports kino-rank.mjs directly.
+  assert.equal(kino.rank.shortQuery, shortQuery);
+  assert.equal(kino.rank.sortBySimilarity, sortBySimilarity);
+  assert.equal(kino.rank.filterRelevant, filterRelevant);
+});
+
+// The app's prelude.js has no module loader to import kino-rank.mjs with, so it carries a literal
+// copy of the algorithm instead (see both files' own comments). This is what keeps that copy honest.
+// prelude.js lives only in the app repo, not in a published plugin repo: skip here when absent.
+test("kino.rank: the shim and the runtime run the exact same code", (t) => {
+  const preludePath = join(here, "..", "..", "..", "app", "src", "main", "resources", "plugin", "prelude.js");
+  if (!existsSync(preludePath)) { t.skip("no app repo checked out alongside this plugin"); return; }
+  const BEGIN = "kino.rank shared core: BEGIN (byte-identical in kino-rank.mjs and prelude.js)";
+  const END = "kino.rank shared core: END";
+  const coreOf = (path) => {
+    const text = readFileSync(path, "utf8");
+    const beginIdx = text.indexOf(BEGIN);
+    assert.notEqual(beginIdx, -1, `${path} is missing the BEGIN marker`);
+    const contentStart = text.indexOf("\n", beginIdx) + 1;
+    const endIdx = text.indexOf(END, contentStart);
+    assert.notEqual(endIdx, -1, `${path} is missing the END marker`);
+    const contentEnd = text.lastIndexOf("\n", endIdx) + 1;
+    return text.slice(contentStart, contentEnd);
+  };
+  const shim = coreOf(join(here, "..", "kino-rank.mjs"));
+  const prelude = coreOf(preludePath);
+  assert.equal(prelude, shim);
 });
 
 // Same as the app: a url setting's manifest default is never a server the plugin may reach, even
@@ -231,6 +453,144 @@ test("checkOutput drops what the app drops", () => {
   assert.equal(lan.value.expiresInSeconds, 0);
 });
 
+test("checkOutput keeps a live item only for an apiVersion 2 plugin, and never its duration", () => {
+  const items = [
+    { id: "c1", ref: "ch-1", title: "Canal Uno", kind: "live", runtimeMinutes: 120 },
+    { id: "m", ref: "r", title: "M", kind: "movie", runtimeMinutes: 90 },
+  ];
+  const v1 = checkOutput("search", items, { ...JSON.parse(manifest()), capabilities: ["search", "resolve"] });
+  assert.deepEqual(v1.value.items.map((i) => i.id), ["m"]);
+  assert.ok(v1.drops.some((d) => d.includes("c1") && d.includes("live")));
+  const v2 = checkOutput("search", items, { ...JSON.parse(manifest({ apiVersion: 2 })), capabilities: ["search", "resolve"] });
+  assert.deepEqual(v2.value.items.map((i) => [i.id, i.kind, i.runtimeMinutes]), [["c1", "live", 0], ["m", "movie", 90]]);
+  const home = checkOutput("home", [{ id: "vivo", title: "En vivo", items }], { ...JSON.parse(manifest({ apiVersion: 2 })), capabilities: ["home", "resolve"] });
+  assert.deepEqual(home.value[0].items.map((i) => i.kind), ["live", "movie"]);
+  assert.deepEqual(contract.output.itemKinds, ["movie", "series", "live"]);
+  assert.equal(contract.output.liveKindApiVersion, 2);
+});
+
+test("checkOutput validates a stream's audioTracks like its subtitles", () => {
+  const m = JSON.parse(manifest());
+  const r = checkOutput("resolve", {
+    url: "https://example.com/v.mp4",
+    audioTracks: [
+      { lang: "en", url: "https://example.com/a-en.aac", label: "English" },
+      { lang: "es", url: "https://evil.example/a-es.aac" },
+    ],
+  }, m);
+  assert.deepEqual(r.value.audioTracks.map((a) => a.lang), ["en"]);
+  const many = checkOutput("resolve", {
+    url: "https://example.com/v.mp4",
+    audioTracks: Array.from({ length: 10 }, (_, i) => ({ lang: "en", url: `https://example.com/a${i}.aac` })),
+  }, m);
+  assert.equal(many.value.audioTracks.length, contract.output.maxAudioTracks);
+});
+
+test("checkOutput accepts a widevine drm block only for a plugin that declares drm, and checks its license like the url", () => {
+  const stream = {
+    url: "https://example.com/v.mpd",
+    drm: { type: "widevine", licenseUrl: "https://example.com/lic", licenseHeaders: { Authorization: "Bearer t", Host: "evil", "X-Bad": "a\nb" } },
+  };
+  const plain = { ...JSON.parse(manifest({ apiVersion: 2 })), capabilities: ["search", "resolve"] };
+  assert.throws(() => checkOutput("resolve", stream, plain), /El video tiene DRM y los plugins no lo soportan/);
+  assert.throws(() => checkOutput("resolve", stream, JSON.parse(manifest())), /El video tiene DRM y los plugins no lo soportan/);
+  const withDrm = { ...plain, capabilities: ["search", "resolve", "drm"] };
+  const r = checkOutput("resolve", stream, withDrm).value;
+  assert.deepEqual(r.drm, { type: "widevine", licenseUrl: "https://example.com/lic", licenseHeaders: { Authorization: "Bearer t" } });
+  assert.equal(checkOutput("resolve", { url: "https://example.com/v.mp4" }, withDrm).value.drm, null);
+  const bad = (drm) => () => checkOutput("resolve", { url: "https://example.com/v.mpd", drm }, withDrm);
+  assert.throws(bad({ type: "widevine", licenseUrl: "http://example.com/lic" }), /La licencia del video debe usar https/);
+  assert.throws(bad({ type: "widevine", licenseUrl: "https://evil.example/lic" }), /La licencia del video apunta a evil.example, que el plugin no declaró/);
+  assert.throws(bad({ type: "widevine" }), /La licencia del video tiene una dirección inválida/);
+  assert.throws(bad({ type: "playready", licenseUrl: "https://example.com/lic" }), /El video usa un DRM que Kino no soporta/);
+  assert.throws(bad("widevine"), /El DRM del video no es válido/);
+  for (const k of ["license", "licenseUrl", "drmLicenseUrl", "keySystem", "widevine"]) {
+    assert.throws(() => checkOutput("resolve", { url: "https://example.com/v.mpd", [k]: "x" }, withDrm), /El video tiene DRM/);
+    assert.throws(() => checkOutput("resolve", { ...stream, [k]: "x" }, withDrm), /El video tiene DRM/);
+  }
+  assert.deepEqual(contract.output.drm, { field: "drm", types: ["widevine"] });
+  assert.equal(contract.output.maxHeaders, 20);
+  // A protected video may still bring side audio tracks: both are kept (the app plays the audio clear).
+  const both = checkOutput("resolve", { ...stream, audioTracks: [{ lang: "es", url: "https://example.com/a.aac" }, { lang: "en", url: "https://evil.example/a.aac" }] }, withDrm).value;
+  assert.equal(both.drm.licenseUrl, "https://example.com/lic");
+  assert.deepEqual(both.audioTracks.map((a) => a.lang), ["es"]);
+});
+
+test("checkOutput lets a stream, its subtitles, audio and license use http only on a host declared insecureHttp", () => {
+  const m = validateManifest(manifest({
+    apiVersion: 2,
+    hosts: ["api.example.com", { host: "cdn.example.com", insecureHttp: true }, "lic.example.com"],
+    capabilities: ["search", "resolve", "drm"],
+  })).manifest;
+  const r = checkOutput("resolve", {
+    url: "http://cdn.example.com/v.mpd",
+    subtitles: [{ lang: "es", url: "http://cdn.example.com/s.vtt" }, { lang: "en", url: "http://api.example.com/s.vtt" }],
+    audioTracks: [{ lang: "es", url: "http://cdn.example.com/a.aac" }, { lang: "en", url: "http://lic.example.com/a.aac" }],
+    drm: { type: "widevine", licenseUrl: "http://cdn.example.com/lic" },
+  }, m).value;
+  assert.equal(r.url, "http://cdn.example.com/v.mpd");
+  assert.deepEqual(r.subtitles.map((s) => s.lang), ["es"]);
+  assert.deepEqual(r.audioTracks.map((a) => a.lang), ["es"]);
+  assert.equal(r.drm.licenseUrl, "http://cdn.example.com/lic");
+  // Every other declared host stays https-only, and https still works on the insecure one.
+  assert.throws(() => checkOutput("resolve", { url: "http://api.example.com/v.mp4" }, m), /El video debe usar https/);
+  assert.throws(() => checkOutput("resolve", { url: "http://sub.cdn.example.com/v.mp4" }, m), /El video debe usar https/);
+  assert.throws(() => checkOutput("resolve", { url: "https://cdn.example.com/v.mp4", drm: { type: "widevine", licenseUrl: "http://lic.example.com/l" } }, m), /La licencia del video debe usar https/);
+  assert.equal(checkOutput("resolve", { url: "https://cdn.example.com/v.mp4" }, m).value.url, "https://cdn.example.com/v.mp4");
+  // A v1 manifest (never an insecure host) is unchanged: http is refused on every declared host.
+  assert.throws(() => checkOutput("resolve", { url: "http://example.com/v.mp4" }, validateManifest(manifest()).manifest), /El video debe usar https/);
+});
+
+test("kino.fetch reaches a host declared insecureHttp over http, and no other declared host", async () => {
+  const s = await server((req, res) => { res.writeHead(200, { "Content-Type": "text/plain" }); res.end("hola " + req.url); });
+  const m = validateManifest(manifest({ apiVersion: 2, hosts: ["api.example.com", { host: "cdn.example.com", insecureHttp: true }] })).manifest;
+  const port = s.address().port;
+  const local = (url, init) => fetch(String(url).replace(/^http:\/\/[^/]+/, `http://127.0.0.1:${port}`), init);
+  let touched = 0;
+  const { kino } = createKino(m, { fetchImpl: (url, init) => { touched++; return local(url, init); } });
+  try {
+    const r = await kino.fetch("http://cdn.example.com/x");
+    assert.equal(r.status, 200);
+    assert.equal(r.text(), "hola /x");
+    assert.equal(r.url, "http://cdn.example.com/x");
+    await assert.rejects(kino.fetch("http://api.example.com/x"), (e) => e.code === "host_not_allowed" && /https/.test(e.message));
+    await assert.rejects(kino.fetch("http://sub.cdn.example.com/x"), (e) => e.code === "host_not_allowed");
+    assert.equal(touched, 1);
+    // A v1 plugin never has an insecure host: http on its declared host is refused as always.
+    const v1 = createKino(JSON.parse(manifest()), { fetchImpl: () => { throw new Error("must not reach the network"); } }).kino;
+    await assert.rejects(v1.fetch("http://example.com/"), (e) => e.code === "host_not_allowed");
+  } finally {
+    s.close();
+  }
+});
+
+test("checkOutput reads an episodes answer's sibling seasons as the app does", () => {
+  const m = JSON.parse(manifest({ capabilities: ["search", "episodes", "resolve"] }));
+  const none = checkOutput("episodes", { episodes: [{ number: 1, ref: "e1" }] }, m);
+  assert.deepEqual(none.value.seasons, []);
+  const r = checkOutput("episodes", {
+    episodes: [{ number: 1, ref: "e1" }],
+    seasons: [
+      { id: "s1", ref: "S1", title: "Temporada 1", number: 1 },
+      { id: "s2", ref: "S2", title: "Temporada 2", number: 2, current: true },
+      { id: "s2", ref: "S2b", title: "Repetida" },
+      { id: "bad id!", ref: "S3", title: "T" },
+      { id: "s4", ref: "", title: "T" },
+      { id: "s5", ref: "S5", title: "  " },
+      { id: "s6", ref: "S6", title: "Sin número", number: 1000, current: "yes" },
+    ],
+  }, m);
+  assert.deepEqual(r.value.seasons, [
+    { id: "s1", ref: "S1", title: "Temporada 1", number: 1, current: false },
+    { id: "s2", ref: "S2", title: "Temporada 2", number: 2, current: true },
+    { id: "s6", ref: "S6", title: "Sin número", number: 0, current: false },
+  ]);
+  assert.equal(r.drops.length, 4);
+  const many = { episodes: [], seasons: Array.from({ length: 60 }, (_, i) => ({ id: `s${i}`, ref: `S${i}`, title: `T${i}` })) };
+  assert.equal(checkOutput("episodes", many, m).value.seasons.length, contract.output.maxSeasons);
+  assert.deepEqual(checkOutput("episodes", { episodes: [], seasons: "T1, T2" }, m).value.seasons, []);
+});
+
 test("run.mjs's call() gives a clear message for a malformed search argument, not a bare JSON error", async () => {
   await assert.rejects(
     call({ search: () => {} }, "search", ['{"q": bad json']),
@@ -294,6 +654,7 @@ test("kino.d.ts's documented numbers match contract.json", () => {
     `at most ${c.errors.maxMessageChars} characters`,
     `0..${c.sleep.maxMs} ms`,
     `${c.storage.maxTotalBytes / 1024} KB in total`,
+    `at most ${c.storage.maxTtlMs.toLocaleString("en-US")} ms (30 days)`,
     `Data at most ${kb(c.crypto.maxDataBytes)}`,
     `iterations at most ${c.crypto.pbkdf2MaxIterations}, keyLength at most ${c.crypto.pbkdf2MaxKeyBytes} bytes`,
     `1..${c.crypto.randomMaxBytes} bytes`,

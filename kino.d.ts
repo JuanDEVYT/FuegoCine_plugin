@@ -1,4 +1,4 @@
-// TypeScript declarations for Kino plugins (apiVersion 1, SDK v1). Reference them from plugin.js
+// TypeScript declarations for Kino plugins (apiVersion 1 and 2). Reference them from plugin.js
 // with `/// <reference path="./kino.d.ts" />` for editor help; Kino itself runs plain JavaScript.
 // The numbers in the comments come from contract.json, which is authoritative. The app checks that
 // every `kino` member declared here exists in its runtime and nothing else does (KinoDtsTest).
@@ -26,7 +26,13 @@ interface KinoItem {
   /** Your own opaque reference, at most 4096 characters. */
   ref: string;
   title: string;
-  kind: "movie" | "series";
+  /**
+   * `"live"` needs `"apiVersion": 2` (a v1 plugin's live item is dropped): a live channel, whose
+   * `ref` goes to `resolve` and plays as live straight from its card, with an "EN VIVO" badge; it
+   * has no `runtimeMinutes` (ignored) and no episodes, is never saved to the library, never resumed
+   * and never downloaded.
+   */
+  kind: "movie" | "series" | "live";
   year?: string | number;
   /** https, at most 2048 characters; never an IP or a local name (except the person's own server). */
   poster?: string;
@@ -37,7 +43,7 @@ interface KinoItem {
   genres?: string[];
   /** 0..10 */
   rating?: number;
-  /** 1..1000 */
+  /** 1..1000; ignored on a `live` item. */
   runtimeMinutes?: number;
   ids?: { tmdb?: number; /** ^tt\d{5,10}$ */ imdb?: string };
   lang?: string;
@@ -86,20 +92,65 @@ interface KinoSeriesInfo {
   year?: string | number;
 }
 
+/**
+ * One season of a series, for a source that keeps each season as its own `series` item: that item's
+ * `id` and `ref` (`episodes(ref)` lists it). `title` is what the season selector shows ("Temporada 2");
+ * `current` marks the season whose episodes came in the same answer (Kino also recognizes it by `id`).
+ */
+interface KinoSeason {
+  /** The season's own item id, same pattern as an item id. */
+  id: string;
+  /** The season's own series ref, at most 4096 characters. */
+  ref: string;
+  title: string;
+  /** 1..999; leave it out when the source has no numbering. */
+  number?: number;
+  current?: boolean;
+}
+
 interface KinoEpisodes {
   series?: KinoSeriesInfo;
   episodes: KinoEpisode[];
+  /**
+   * Only when each season is a separate item: every season of the show, this one included, at most
+   * 50. Leave it out when `episodes` already holds every season (Kino reads the seasons from them).
+   */
+  seasons?: KinoSeason[];
 }
 
 interface KinoStream {
-  /** https on a declared host, or the person's own server exactly as typed. */
+  /** https on a declared host (http only on one declared `insecureHttp`), or the person's own server exactly as typed. */
   url: string;
   mime?: string;
+  /**
+   * Sent with every request the player makes for this stream (and, for a plugin that declares the
+   * `download` capability, with the request that saves it to the device). At most 20.
+   */
   headers?: Record<string, string>;
   subtitles?: { lang: string; url: string; format?: "vtt" | "srt" }[];
+  /**
+   * Separately-hosted audio tracks (a dub, an alternate mix), at most 8: Kino plays your video with
+   * each merged in as its own track, offered and auto-picked by the person's audio-language
+   * preference exactly like the container's own. `lang` is a short code like `subtitles`' (up to 16
+   * characters; blank becomes `"und"`); `label`, if given (up to 40 characters), is shown verbatim
+   * instead of a name guessed from `lang`. Checked the same way as `subtitles`: https on a declared
+   * host, or the person's own server exactly as typed; a bad entry is dropped and the rest survive.
+   */
+  audioTracks?: { lang: string; url: string; label?: string }[];
+  /** Ignored for a `live` item's stream: a channel has no length. */
   durationMs?: number;
   /** 30..86400: after that long, a failed playback calls resolve() once more. */
   expiresInSeconds?: number;
+  /**
+   * apiVersion 2, and only with the `drm` capability declared: the stream is Widevine-protected and
+   * Kino fetches its license from `licenseUrl` (checked exactly like `url`: https on a declared host, http only on one declared `insecureHttp`)
+   * sending `licenseHeaders` (filtered like `headers`, at most 20) with the license request only.
+   * Without the capability any DRM-shaped key refuses the stream. A protected title never downloads.
+   * Kino negotiates Widevine at security level L3 (software), and only when the device confirms L3:
+   * the license server must allow it. `audioTracks` next to `drm` are played clear (no license for
+   * them): plain, unencrypted files only.
+   */
+  drm?: { type: "widevine"; licenseUrl: string; licenseHeaders?: Record<string, string> };
 }
 
 /** Your module's exports. `resolve` is required, and at least one of `search`/`home`. */
@@ -183,7 +234,7 @@ declare namespace kino {
   const appVersion: string;
   const lang: string;
 
-  /** Only to the manifest's hosts over https, or to the person's own server as typed. Never throws for a non-2xx status. */
+  /** Only to the manifest's hosts over https (http only on a host declared `insecureHttp`), or to the person's own server as typed. Never throws for a non-2xx status. */
   function fetch(url: string, options?: KinoFetchOptions): Promise<KinoResponse>;
 
   /** `throw kino.error("not_found", "…")`: the app words the message; yours is a detail of at most 200 characters. */
@@ -201,10 +252,19 @@ declare namespace kino {
   }
 
   namespace storage {
-    /** 256 KB in total for this plugin. */
+    /** 256 KB in total for this plugin. Returns `null` once the entry has expired (see `set`). */
     function get(key: string): string | null;
-    function set(key: string, value: string): void;
+    /**
+     * `options.ttlMs` makes the entry expire: after that many milliseconds, `get` returns `null` and
+     * `keys()` leaves it out, even across a restart of the app. A whole number greater than 0,
+     * at most 2,592,000,000 ms (30 days); anything else throws before the entry is touched. Leave
+     * out `options` (or `ttlMs`) for a permanent entry, exactly as before this option existed. An
+     * expired entry never counts against the 256 KB cap: it is dropped the next time your plugin
+     * reads or writes storage.
+     */
+    function set(key: string, value: string, options?: { ttlMs?: number }): void;
     function remove(key: string): void;
+    /** Expired keys are already gone. */
     function keys(): string[];
   }
 
@@ -235,6 +295,34 @@ declare namespace kino {
     function randomBytes(n: number, outputEncoding?: KinoEncoding): string;
     /** A random (v4) UUID. */
     function uuid(): string;
+  }
+
+  namespace rank {
+    /**
+     * The title's HEAD, up to its first `:`, `,`, `|`, en dash or em dash -- for a search backend
+     * that ranks a short query better than a long one. A one- or two-letter head identifies
+     * nothing, so the whole (trimmed) text comes back instead; a plain "-" is never a cut point (it
+     * would split a hyphenated word like "Spider-Man").
+     */
+    function shortQuery(query: string): string;
+    /**
+     * Reorders `items` so the ones sharing the most words with `query` come first; ties keep
+     * `items`' own order. `query` is a title, or several forms of one (try `query.q`,
+     * `query.originalTitle` and `query.altTitles` together: a backend may only know a title in one
+     * language). `getTitle` reads a title off an item, string or array of them; it defaults to
+     * `(item) => item.title`. Never throws: `items` not an array answers `[]`; an item with no
+     * usable title (missing, not a string, or `getTitle` itself failing) sorts after every item
+     * that has one, in `items`' own order among themselves.
+     */
+    function sortBySimilarity(items: any[], query: string | string[], getTitle?: (item: any) => string | string[]): any[];
+    /**
+     * Drops items sharing too few words with `query` (under 60% of its distinctive words of 3+
+     * letters), and any item with no usable title along with them. Never throws: `items` not an
+     * array answers `[]`. Reordering alone (`sortBySimilarity`) still shows a full page of near-misses when
+     * the title genuinely is not on the backend, so an absent title comes back with 0 results
+     * instead.
+     */
+    function filterRelevant(items: any[], query: string | string[], getTitle?: (item: any) => string | string[]): any[];
   }
 }
 

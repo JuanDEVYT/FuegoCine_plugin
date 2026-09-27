@@ -43,7 +43,7 @@ This repository is also the starting point for your own plugin:
 
 - [`GUIDE.md`](GUIDE.md) is the authoring guide: file layout, manifest and settings, the five
   functions your code can export, the `kino` API, every limit, the quirks of the JavaScript engine
-  and three cookbook recipes.
+  and five cookbook recipes.
 - [`contract.json`](contract.json) holds every number and rule Kino enforces, and
   [`kino.d.ts`](kino.d.ts) declares the `kino` API for your editor.
 - [`sdk/`](sdk) lets you run and test a plugin on your computer with Node 18 or newer, using the same
