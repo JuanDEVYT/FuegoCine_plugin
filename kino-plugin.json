@@ -9,5 +9,6 @@
   "homepage": "https://github.com/kinotvapp/kino-plugin-archive",
   "hosts": ["archive.org", "*.archive.org"],
   "capabilities": ["search", "home", "browse", "episodes", "resolve"],
-  "color": "#E0A030"
+  "color": "#E0A030",
+  "icon": "icon.png"
 }
