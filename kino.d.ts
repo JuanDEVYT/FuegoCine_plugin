@@ -1,4 +1,4 @@
-// TypeScript declarations for Kino plugins (apiVersion 1 and 2). Reference them from plugin.js
+// TypeScript declarations for Kino plugins (apiVersion 1, 2 and 3). Reference them from plugin.js
 // with `/// <reference path="./kino.d.ts" />` for editor help; Kino itself runs plain JavaScript.
 // The numbers in the comments come from contract.json, which is authoritative. The app checks that
 // every `kino` member declared here exists in its runtime and nothing else does (KinoDtsTest).
@@ -119,7 +119,10 @@ interface KinoEpisodes {
 }
 
 interface KinoStream {
-  /** https on a declared host (http only on one declared `insecureHttp`), or the person's own server exactly as typed. */
+  /**
+   * https on a declared host (http only on one declared `insecureHttp`), or the person's own server exactly as typed.
+   * A live channel's stream of a plugin approved for `"liveStreamHosts": "any"` may be on any public host, http or https.
+   */
   url: string;
   mime?: string;
   /**
@@ -134,7 +137,9 @@ interface KinoStream {
    * preference exactly like the container's own. `lang` is a short code like `subtitles`' (up to 16
    * characters; blank becomes `"und"`); `label`, if given (up to 40 characters), is shown verbatim
    * instead of a name guessed from `lang`. Checked the same way as `subtitles`: https on a declared
-   * host, or the person's own server exactly as typed; a bad entry is dropped and the rest survive.
+   * host, or the person's own server exactly as typed; a bad entry is dropped and the rest survive,
+   * and so is a `url` already listed (the first entry wins). Ignored for a `live` item's stream: a
+   * channel's other languages go inside its manifest.
    */
   audioTracks?: { lang: string; url: string; label?: string }[];
   /** Ignored for a `live` item's stream: a channel has no length. */
@@ -153,6 +158,65 @@ interface KinoStream {
   drm?: { type: "widevine"; licenseUrl: string; licenseHeaders?: Record<string, string> };
 }
 
+/** apiVersion 3, capability "channels": a section of the En vivo tab. */
+interface KinoLiveCategory {
+  id: string;
+  title: string;
+  /** ISO 3166 alpha-2, e.g. "CO". Informational. */
+  country?: string;
+}
+
+/**
+ * apiVersion 3: an M3U playlist Kino downloads itself (from a declared host only, never under
+ * `liveStreamHosts: "any"`), with an optional XMLTV guide. Put it next to your categories in the
+ * `liveCategories()` answer, or return it alone. At most 10 per answer. `refreshHours` is 1..168,
+ * default 12. `hideGroups` are group titles not to show (case-insensitive), at most 50. With
+ * `resolve: true` each entry plays through your `resolve(<entry url>)` instead of directly.
+ */
+interface KinoPlaylist {
+  playlist: {
+    url: string;
+    format: "m3u";
+    headers?: Record<string, string>;
+    epg?: { url: string; format: "xmltv" };
+    refreshHours?: number;
+    hideGroups?: string[];
+    resolve?: boolean;
+  };
+}
+
+/**
+ * One channel: give `ref` (resolved on play, exactly like a `live` item's) or `stream` (played as
+ * is, checked like `resolve()`'s answer). With both, the stream plays and `ref` is the fallback.
+ * An `id` starting with `~` is reserved for Kino and dropped.
+ */
+interface KinoLiveChannel {
+  id: string;
+  title: string;
+  ref?: string;
+  stream?: KinoStream;
+  categoryId: string;
+  /** https image, like a poster. */
+  logo?: string;
+  /** 1..9999. */
+  number?: number;
+}
+
+interface KinoLiveChannelPage {
+  items: KinoLiveChannel[];
+  /** Opaque cursor for the next page; omit or null at the end. */
+  next?: string | null;
+}
+
+/** One programme. `start`/`end` are epoch milliseconds. */
+interface KinoGuideEntry {
+  channelId: string;
+  title: string;
+  start: number;
+  end: number;
+  description?: string;
+}
+
 /** Your module's exports. `resolve` is required, and at least one of `search`/`home`. */
 interface KinoPlugin {
   search?(query: KinoSearchQuery): Promise<KinoItem[] | KinoPage>;
@@ -160,6 +224,12 @@ interface KinoPlugin {
   browse?(ref: string, cursor: string | null): Promise<KinoPage>;
   episodes?(ref: string): Promise<KinoEpisodes>;
   resolve(ref: string): Promise<KinoStream>;
+  /** apiVersion 3, capability "channels" (required with it). At most 200 categories. */
+  liveCategories?(): Promise<Array<KinoLiveCategory | KinoPlaylist> | KinoPlaylist>;
+  /** apiVersion 3, capability "channels" (required with it). At most 500 per page. */
+  liveChannels?(arg: { categoryId: string; cursor: string | null }): Promise<KinoLiveChannelPage | KinoLiveChannel[]>;
+  /** apiVersion 3, optional with "channels". At most 50 channels and a 24 h window per call. */
+  guide?(arg: { channelIds: string[]; from: number; to: number }): Promise<KinoGuideEntry[]>;
 }
 
 // ---------- the kino API ----------

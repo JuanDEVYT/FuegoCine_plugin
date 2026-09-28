@@ -2,9 +2,10 @@
 // The kit against the same rules and vectors the app's JVM tests use.
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import { createServer } from "node:http";
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { gzipSync } from "node:zlib";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -14,6 +15,7 @@ import { filterRelevant, shortQuery, sortBySimilarity } from "../kino-rank.mjs";
 import { validate } from "../validate.mjs";
 import { scaffold } from "../init.mjs";
 import { call } from "../run.mjs";
+import { ADULT_GROUPS, normaliseName, parseM3u, parseXmltv, parseXmltvTime, summarisePlaylist } from "../live-playlist.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
 // Published repo: plugin.js/kino-plugin.json live at the repo root, two levels up from here.
@@ -25,8 +27,8 @@ const manifest = (extra = {}) => JSON.stringify({
 });
 
 test("contract.json is the one the app pins", () => {
-  assert.equal(contract.apiVersion, 2);
-  assert.deepEqual(contract.capabilities.names, ["search", "home", "browse", "episodes", "resolve", "download", "drm"]);
+  assert.equal(contract.apiVersion, 3);
+  assert.deepEqual(contract.capabilities.names, ["search", "home", "browse", "episodes", "resolve", "download", "drm", "channels"]);
   assert.deepEqual(contract.capabilities.declarative, ["download", "drm"]);
   assert.deepEqual(contract.permissions, []);
 });
@@ -69,6 +71,19 @@ test("apiVersion 2: download/drm and an insecureHttp host validate and are expos
   assert.deepEqual(r.manifest.hosts, ["archive.org", "x.example.com"]);
   assert.deepEqual(r.manifest.insecureHosts, ["x.example.com"]);
   assert.deepEqual(r.manifest.capabilities, ["search", "resolve", "download", "drm"]);
+});
+
+test("apiVersion 2: empty hosts validate only with a url setting, as the app rules", () => {
+  const server = { key: "server", label: "Servidor", type: "url", required: true };
+  const ok = validateManifest(manifest({ apiVersion: 2, hosts: [], settings: [server] }));
+  assert.equal(ok.ok, true);
+  assert.deepEqual(ok.manifest.hosts, []);
+  assert.equal(contract.manifest.noHostsApiVersion, 2);
+  assert.deepEqual(validateManifest(manifest({ hosts: [], settings: [server] })),
+    { ok: false, field: "hosts", message: 'El campo "hosts" debe tener de 1 a 20 dominios' });
+  const noUrl = { ok: false, field: "hosts", message: 'El campo "hosts" solo puede estar vacío si el plugin tiene un ajuste de tipo "url"' };
+  assert.deepEqual(validateManifest(manifest({ apiVersion: 2, hosts: [] })), noUrl);
+  assert.deepEqual(validateManifest(manifest({ apiVersion: 2, hosts: [], settings: [{ key: "user", label: "Usuario", type: "text" }] })), noUrl);
 });
 
 test("validate() does not require download/drm to be exported functions", async () => {
@@ -335,10 +350,10 @@ test("kino.rank: the shim wires the exact same functions the runtime inlines", (
 
 // The app's prelude.js has no module loader to import kino-rank.mjs with, so it carries a literal
 // copy of the algorithm instead (see both files' own comments). This is what keeps that copy honest.
-// prelude.js lives only in the app repo, not in a published plugin repo: skip here when absent.
+// prelude.js lives only in the app repo, not in a published plugin repo: skip there.
 test("kino.rank: the shim and the runtime run the exact same code", (t) => {
   const preludePath = join(here, "..", "..", "..", "app", "src", "main", "resources", "plugin", "prelude.js");
-  if (!existsSync(preludePath)) { t.skip("no app repo checked out alongside this plugin"); return; }
+  if (!existsSync(preludePath)) { t.skip("no app repo around this kit"); return; }
   const BEGIN = "kino.rank shared core: BEGIN (byte-identical in kino-rank.mjs and prelude.js)";
   const END = "kino.rank shared core: END";
   const coreOf = (path) => {
@@ -486,6 +501,19 @@ test("checkOutput validates a stream's audioTracks like its subtitles", () => {
   assert.equal(many.value.audioTracks.length, contract.output.maxAudioTracks);
 });
 
+test("checkOutput keeps an audio track URL given twice once, the first wins, as the app does", () => {
+  const m = JSON.parse(manifest());
+  const r = checkOutput("resolve", {
+    url: "https://example.com/v.mp4",
+    audioTracks: [
+      { lang: "es", url: "https://example.com/a.aac", label: "Latino" },
+      { lang: "en", url: "https://example.com/a.aac" },
+      { lang: "fr", url: "https://example.com/b.aac" },
+    ],
+  }, m);
+  assert.deepEqual(r.value.audioTracks.map((a) => a.lang), ["es", "fr"]);
+});
+
 test("checkOutput accepts a widevine drm block only for a plugin that declares drm, and checks its license like the url", () => {
   const stream = {
     url: "https://example.com/v.mpd",
@@ -562,6 +590,29 @@ test("kino.fetch reaches a host declared insecureHttp over http, and no other de
   } finally {
     s.close();
   }
+});
+
+test("checkOutput keeps an episode's still, overview and runtimeMinutes as the app does", () => {
+  const m = JSON.parse(manifest({ capabilities: ["search", "episodes", "resolve"] }));
+  const r = checkOutput("episodes", {
+    episodes: [
+      { number: 1, ref: "e1", title: "Uno", still: "https://example.com/e1.png", overview: "  Primero  ", runtimeMinutes: 42 },
+      { number: 2, ref: "e2", still: "http://example.com/e2.png", runtimeMinutes: 0 },
+      { number: 3, ref: "e3", still: "https://192.168.1.5/e3.png", runtimeMinutes: 99999 },
+    ],
+  }, m);
+  const [one, two, three] = r.value.episodes;
+  assert.equal(one.still, "https://example.com/e1.png");
+  assert.equal(one.overview, "Primero");
+  assert.equal(one.runtimeMinutes, 42);
+  // The image rule of an item's poster: https only, never the home network; a bad length is 0.
+  assert.equal(two.still, "");
+  assert.equal(two.runtimeMinutes, 0);
+  assert.equal(three.still, "");
+  assert.equal(three.runtimeMinutes, 0);
+  // The person's own server (a url setting) may serve the still, over http too.
+  const own = checkOutput("episodes", { episodes: [{ number: 1, ref: "e1", still: "http://192.168.1.5:8096/e1.png" }] }, m, ["http://192.168.1.5:8096"]);
+  assert.equal(own.value.episodes[0].still, "http://192.168.1.5:8096/e1.png");
 });
 
 test("checkOutput reads an episodes answer's sibling seasons as the app does", () => {
@@ -695,4 +746,368 @@ test("kino.d.ts declares exactly what the kit's kino has", () => {
   });
   walk(kino, "kino");
   assert.deepEqual([...out].sort(), [...declaredKino()].sort());
+});
+
+test("apiVersion 3: channels validates only on v3, and needs liveCategories + liveChannels exported", async () => {
+  const caps = ["home", "resolve", "channels"];
+  assert.deepEqual(validateManifest(manifest({ capabilities: caps })), { ok: false, field: "capabilities", message: "Esta capacidad necesita apiVersion 3" });
+  assert.deepEqual(validateManifest(manifest({ apiVersion: 2, capabilities: caps })), { ok: false, field: "capabilities", message: "Esta capacidad necesita apiVersion 3" });
+  assert.deepEqual(validateManifest(manifest({ capabilities: ["search", "resolve", "download"] })), { ok: false, field: "capabilities", message: "Esta capacidad necesita apiVersion 2" });
+  assert.equal(validateManifest(manifest({ apiVersion: 3, capabilities: caps })).ok, true);
+  const dir = mkdtempSync(join(tmpdir(), "kino-channels-"));
+  try {
+    writeFileSync(join(dir, "kino-plugin.json"), manifest({ apiVersion: 3, capabilities: caps }));
+    writeFileSync(join(dir, "plugin.js"), "export async function home(){ return [] }\nexport async function resolve(){ return { url: 'https://example.com/a.m3u8' } }");
+    const missing = await validate(dir);
+    assert.ok(missing.problems.some((p) => p.includes("liveCategories, liveChannels")));
+    writeFileSync(join(dir, "plugin.js"), "export async function home(){ return [] }\nexport async function resolve(){ return { url: 'https://example.com/a.m3u8' } }\nexport async function liveCategories(){ return [] }\nexport async function liveChannels(){ return { items: [] } }");
+    assert.deepEqual((await validate(dir)).problems, []);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("checkOutput reads liveCategories, liveChannels and guide as the app does", () => {
+  const m = { ...JSON.parse(manifest({ apiVersion: 3 })), capabilities: ["home", "resolve", "channels"] };
+  const cats = checkOutput("liveCategories", [{ id: "news", title: "Noticias", country: "co" }, { id: "news", title: "x" }, { id: "a", title: "A", adult: true }], m);
+  assert.deepEqual(cats.value.categories, [{ id: "news", title: "Noticias", country: "CO" }]);
+  const page = checkOutput("liveChannels", { items: [
+    { id: "c1", title: "Uno", ref: "r1", number: 7, categoryId: "news" },
+    { id: "c2", title: "Dos", ref: "" },
+    { id: "c3", title: "Tres", ref: "r3", number: 10000 },
+  ], next: "p2" }, m);
+  assert.deepEqual(page.value.items.map((c) => [c.id, c.number]), [["c1", 7], ["c3", 0]]);
+  assert.equal(page.value.next, "p2");
+  const g = checkOutput("guide", [
+    { channelId: "c1", title: "B", start: 2000, end: 3000 },
+    { channelId: "c1", title: "A", start: 1000, end: 2000, description: "d" },
+    { channelId: "c1", title: "Mal", start: 5, end: 4 },
+  ], m);
+  assert.deepEqual(g.value.map((e) => e.title), ["A", "B"]);
+  assert.equal(contract.live.maxChannelsPerPage, 500);
+});
+
+test("checkOutput reads inline streams and playlist declarations as the app does", () => {
+  const m = { ...JSON.parse(manifest({ apiVersion: 3, hosts: ["cdn.example.com"] })), capabilities: ["home", "resolve", "channels"] };
+  const page = checkOutput("liveChannels", { items: [
+    { id: "a", title: "A", stream: { url: "https://cdn.example.com/a.m3u8" } },
+    { id: "b", title: "B", stream: { url: "https://evil.example.org/b.m3u8" } },
+    { id: "~c", title: "C", ref: "r" },
+  ] }, m);
+  assert.deepEqual(page.value.items.map((c) => c.id), ["a"]);
+  assert.equal(page.value.items[0].ref, "");
+  assert.equal(page.value.items[0].stream.url, "https://cdn.example.com/a.m3u8");
+  const cats = checkOutput("liveCategories", [
+    { id: "news", title: "Noticias" },
+    { playlist: { url: "https://cdn.example.com/l.m3u", format: "m3u", epg: { url: "https://cdn.example.com/g.xml", format: "xmltv" } } },
+    { playlist: { url: "https://evil.example.org/l.m3u", format: "m3u" } },
+  ], m);
+  assert.deepEqual(cats.value.categories.map((c) => c.id), ["news"]);
+  assert.deepEqual(cats.value.playlists.map((p) => [p.url, p.epgUrl, p.refreshHours]), [["https://cdn.example.com/l.m3u", "https://cdn.example.com/g.xml", 12]]);
+  // Strict like the app: only the boolean true, never the string "true"; an array epg is ignored.
+  const stringy = checkOutput("liveCategories", { playlist: { url: "https://cdn.example.com/l.m3u", format: "m3u", resolve: "true", epg: [] } }, m);
+  assert.deepEqual(stringy.value.playlists.map((p) => [p.resolve, p.epgUrl]), [[false, ""]]);
+});
+
+test("run.mjs builds the live arguments the app sends", async () => {
+  const seen = [];
+  const plugin = {
+    liveCategories: async (a) => { seen.push(["liveCategories", a]); return []; },
+    liveChannels: async (a) => { seen.push(["liveChannels", a]); return { items: [] }; },
+    guide: async (a) => { seen.push(["guide", a.channelIds, a.to - a.from]); return []; },
+  };
+  await call(plugin, "liveCategories", []);
+  await call(plugin, "liveChannels", ["news", "p2"]);
+  await call(plugin, "guide", ["c1,c2"]);
+  assert.deepEqual(seen, [
+    ["liveCategories", null],
+    ["liveChannels", { categoryId: "news", cursor: "p2" }],
+    ["guide", ["c1", "c2"], 24 * 3600 * 1000],
+  ]);
+});
+
+test("liveStreamHosts any is read only on v3, and needs channels there", () => {
+  const caps = ["home", "resolve", "channels"];
+  assert.equal(validateManifest(manifest({ apiVersion: 3, capabilities: caps, liveStreamHosts: "any" })).manifest.liveStreamHostsAny, true);
+  // v1/v2 ignore it like any unknown field: never refused, never honoured.
+  for (const apiVersion of [1, 2]) for (const v of ["any", "x", true]) {
+    assert.equal(validateManifest(manifest({ apiVersion, liveStreamHosts: v })).manifest.liveStreamHostsAny, false);
+  }
+  assert.deepEqual(validateManifest(manifest({ apiVersion: 3, liveStreamHosts: "any" })), { ok: false, field: "liveStreamHosts", message: '"liveStreamHosts" necesita la capacidad "channels"' });
+  assert.deepEqual(validateManifest(manifest({ apiVersion: 3, capabilities: caps, liveStreamHosts: "x" })), { ok: false, field: "liveStreamHosts", message: 'El campo "liveStreamHosts" solo admite "any"' });
+  assert.equal(validateManifest(manifest({ apiVersion: 3, capabilities: caps })).manifest.liveStreamHostsAny, false);
+  assert.deepEqual(contract.manifest.liveStreamHosts, { value: "any", apiVersion: 3, requires: "channels" });
+});
+
+// ---------- live channels: the kit's own M3U/XMLTV readers (apiVersion 3) ----------
+
+// The shared corpus the app's JVM tests read too. It lives only in Kino's repo
+// (docs/plugins/fixtures/live); a published plugin repo (sdk/ and contract.json at its root) doesn't
+// ship it, so these tests skip there.
+const fixturesDir = join(here, "..", "..", "..", "docs", "plugins", "fixtures", "live");
+const fixtures = existsSync(fixturesDir) ? fixturesDir : null;
+const needFixtures = (t) => { if (!fixtures) t.skip("no shared live fixtures around this kit"); return !!fixtures; };
+const M3U_FIXTURES = ["basic", "bom-crlf", "latin1", "broken", "headers", "unterminated-quote", "huge-line"];
+
+test("the kit's M3U reader gives the app's exact answer on every shared fixture", (t) => {
+  if (!needFixtures(t)) return;
+  for (const name of M3U_FIXTURES) {
+    const got = parseM3u(readFileSync(join(fixtures, `${name}.m3u`)));
+    const want = JSON.parse(readFileSync(join(fixtures, `${name}.expected.json`), "utf8"));
+    assert.deepEqual(got, want, name);
+  }
+});
+
+test("every .m3u in the shared corpus has its .expected.json and is checked here", (t) => {
+  if (!needFixtures(t)) return;
+  const m3u = readdirSync(fixtures).filter((f) => f.endsWith(".m3u")).map((f) => f.slice(0, -4)).sort();
+  assert.deepEqual(m3u, [...M3U_FIXTURES].sort());
+  for (const name of m3u) assert.ok(existsSync(join(fixtures, `${name}.expected.json`)), name);
+});
+
+test("the kit's M3U reader keeps the cap and counts the rest", () => {
+  const text = "#EXTM3U\n" + Array.from({ length: 6000 }, (_, i) => `#EXTINF:-1,C${i}\nhttps://x.example.com/${i}.m3u8\n`).join("");
+  const r = parseM3u(text, { maxEntries: 5000 });
+  assert.equal(r.entries.length, 5000);
+  assert.equal(r.total, 6000);
+  assert.equal(r.entries[4999].name, "C4999");
+  assert.equal(parseM3u(text).entries.length, contract.live.maxChannelsPerProvider);
+});
+
+test("the kit's M3U reader drops hidden and refused entries during the parse, never spending the cap", () => {
+  const text = "#EXTM3U\n"
+    + Array.from({ length: 10 }, (_, i) => `#EXTINF:-1 group-title="XXX",A${i}\nhttps://live.example.com/a${i}.m3u8\n`).join("")
+    + Array.from({ length: 4 }, (_, i) => `#EXTINF:-1,E${i}\nhttps://evil.example.org/${i}.m3u8\n`).join("")
+    + Array.from({ length: 5 }, (_, i) => `#EXTINF:-1,C${i}\nhttps://live.example.com/${i}.m3u8\n`).join("");
+  const r = parseM3u(text, { maxEntries: 3, hide: (e) => e.group === "XXX", allow: (url) => !url.includes("evil") });
+  assert.deepEqual(r.entries.map((e) => e.name), ["C0", "C1", "C2"]);
+  assert.deepEqual([r.total, r.hidden, r.refused], [5, 10, 4]);
+  assert.deepEqual(parseM3u(""), { entries: [], total: 0, skipped: 0 });
+});
+
+test("the kit's XMLTV reader gives the app's answer on every shared guide, plain and gzip, and refuses a DOCTYPE", (t) => {
+  if (!needFixtures(t)) return;
+  const iso = (g) => Object.fromEntries(Object.entries(g.programmes).map(([k, l]) =>
+    [k, l.map((p) => ({ title: p.title, start: new Date(p.start).toISOString().replace(".000", ""), end: new Date(p.end).toISOString().replace(".000", ""), description: p.description }))]));
+  const cases = [["guide.xml", "guide"], ["guide.xml.gz", "guide"], ["guide-latin1.xml", "guide-latin1"], ["guide-windows1252.xml", "guide-windows1252"], ["guide-xxe.xml", "guide-xxe"], ["guide-doctype-comment.xml", "guide-doctype-comment"]];
+  for (const [file, expected] of cases) {
+    const want = JSON.parse(readFileSync(join(fixtures, `${expected}.expected.json`), "utf8"));
+    // The window and the wanted ids come from the fixture's own "query", as in the app's test.
+    const q = want.query;
+    const opts = { from: Date.parse(q.from), to: Date.parse(q.to), wantedIds: q.wantedIds ? new Set(q.wantedIds) : null };
+    const g = parseXmltv(readFileSync(join(fixtures, file)), opts);
+    assert.deepEqual(g.displayNames, want.displayNames, file);
+    assert.deepEqual(iso(g), want.programmes, file);
+    assert.equal(g.truncated, want.truncated, file);
+  }
+  const opts = { from: Date.parse("2026-09-27T00:00:00Z"), to: Date.parse("2026-09-28T00:00:00Z"), wantedIds: null };
+  assert.deepEqual(parseXmltv(readFileSync(join(fixtures, "guide-xxe.xml")), opts).programmes, {});
+  assert.equal(parseXmltv(readFileSync(join(fixtures, "guide-latin1.xml")), opts).programmes.n[0].title, "Niñez");
+  // A channel wanted by its display name, accents and case folded.
+  const byName = parseXmltv(readFileSync(join(fixtures, "guide.xml")), { ...opts, wantedIds: new Set(), wantedNames: new Set([normaliseName("CANAL UNO")]) });
+  assert.deepEqual(Object.keys(byName.programmes), ["canal1.co"]);
+  // A gzip cut in half is read as far as it goes, and says so.
+  const gz = readFileSync(join(fixtures, "guide.xml.gz"));
+  assert.equal(parseXmltv(gz.subarray(0, gz.length >> 1), opts).truncated, true);
+  const corrupt = Buffer.from(gz); corrupt[2] = 1;
+  assert.deepEqual(parseXmltv(corrupt, opts).programmes, {});
+});
+
+test("the kit's XMLTV reader: every DOCTYPE refused, caps, times and a broken tail as the app", () => {
+  const from = Date.parse("2026-09-27T00:00:00Z");
+  const to = Date.parse("2026-09-28T00:00:00Z");
+  const prog = (ch, start, stop, title) => `<programme start="${start}" stop="${stop}" channel="${ch}"><title>${title}</title></programme>`;
+  const padded = `<?xml version="1.0"?><!-- ${"x".repeat(8300)} --><!DOCTYPE tv [<!ENTITY s "LEAKED">]><tv>${prog("x", "20260927120000 +0000", "20260927130000 +0000", "&s;")}</tv>`;
+  assert.deepEqual(parseXmltv(Buffer.from(padded), { from, to }), { displayNames: {}, programmes: {}, truncated: false, refused: true });
+  const utf16 = Buffer.concat([Buffer.from([0xff, 0xfe]), Buffer.from(`<?xml version="1.0" encoding="UTF-16"?><!DOCTYPE tv SYSTEM "http://192.0.2.1/x.dtd"><tv>${prog("x", "20260927120000", "20260927130000", "Hi")}</tv>`, "utf16le")]);
+  assert.deepEqual(parseXmltv(utf16, { from, to }).programmes, {});
+  // The earliest per channel survive the cap, whatever the document order.
+  const outOfOrder = `<tv>${[14, 13, 12, 11, 10].map((h) => prog("c", `20260927${h}0000 +0000`, `20260927${h}0100 +0000`, `P${h - 10}`)).join("")}</tv>`;
+  assert.deepEqual(parseXmltv(Buffer.from(outOfOrder), { from, to, maxPerChannel: 3 }).programmes.c.map((p) => p.title), ["P0", "P1", "P2"]);
+  // At most 5000 distinct channels when everything is wanted.
+  const many = `<tv>${Array.from({ length: 5005 }, (_, i) => prog(`c${i}`, "20260927120000 +0000", "20260927130000 +0000", "P")).join("")}</tv>`;
+  assert.equal(Object.keys(parseXmltv(Buffer.from(many), { from, to }).programmes).length, 5000);
+  // A broken tail keeps what parsed, and says so.
+  const broken = parseXmltv(Buffer.from(`<tv>${prog("c", "20260927120000", "20260927130000", "Uno")}<programme`), { from, to });
+  assert.deepEqual([broken.programmes.c.map((p) => p.title), broken.truncated], [["Uno"], true]);
+  // An unknown declared charset falls back to ISO-8859-1.
+  const bogus = Buffer.from(`<?xml version="1.0" encoding="totally-bogus"?><tv>${prog("n", "20260927120000 +0000", "20260927130000 +0000", "Niñez")}</tv>`, "latin1");
+  assert.equal(parseXmltv(bogus, { from, to }).programmes.n[0].title, "Niñez");
+  // The byte cap: a gzip bomb is cut and reported.
+  const body = `<tv>${Array.from({ length: 20000 }, (_, i) => prog(`c${i % 4000}`, "20260927120000 +0000", "20260927130000 +0000", "P")).join("")}</tv>`;
+  const capped = parseXmltv(gzipSync(Buffer.from(body)), { from, to, maxBytes: 200_000 });
+  assert.equal(capped.truncated, true);
+  assert.ok(Object.keys(capped.programmes).length > 0 && Object.keys(capped.programmes).length < 4000);
+  assert.equal(parseXmltvTime("20260927120000 -0500"), Date.parse("2026-09-27T17:00:00Z"));
+  assert.equal(parseXmltvTime("202609271230 +0000"), Date.parse("2026-09-27T12:30:00Z"));
+  assert.equal(parseXmltvTime("basura"), null);
+  assert.equal(parseXmltvTime("20261399000000"), null);
+});
+
+test("run.mjs live playlist reports channels, groups and skipped entries", (t) => {
+  if (!needFixtures(t)) return;
+  const out = execFileSync(process.execPath, [join(here, "..", "run.mjs"), "live", "playlist", join(fixtures, "broken.m3u")], { encoding: "utf8" });
+  assert.match(out, /3 canales/);
+  assert.match(out, /5 entradas descartadas/);
+  assert.match(out, /A › Bueno {2}https:\/\/live\.example\.com\/ok\.m3u8/);
+});
+
+test("run.mjs live playlist --epg shows what is on now, or sin guía", () => {
+  const dir = mkdtempSync(join(tmpdir(), "kino-live-"));
+  try {
+    const now = Date.now();
+    const stamp = (ms) => new Date(ms).toISOString().replace(/[-:T]/g, "").slice(0, 14) + " +0000";
+    writeFileSync(join(dir, "l.m3u"), `#EXTM3U\n#EXTINF:-1 tvg-id="uno" group-title="Noticias",Canal Uno\nhttps://live.example.com/1.m3u8\n#EXTINF:-1 group-title="Adultos",Oculto\nhttps://live.example.com/x.m3u8\n#EXTINF:-1 group-title="Cine",Canal Dos\nhttps://live.example.com/2.m3u8\n`);
+    writeFileSync(join(dir, "g.xml"), `<tv><channel id="uno"><display-name>Canal Uno</display-name></channel><programme start="${stamp(now - 600000)}" stop="${stamp(now + 600000)}" channel="uno"><title>Al aire</title></programme></tv>`);
+    const out = execFileSync(process.execPath, [join(here, "..", "run.mjs"), "live", "playlist", join(dir, "l.m3u"), "--epg", join(dir, "g.xml")], { encoding: "utf8" });
+    assert.match(out, /2 canales en 2 categorías; 0 entradas descartadas; 1 ocultas \(adultos\)/);
+    assert.match(out, /Noticias › Canal Uno .*\n\s+ahora: Al aire/);
+    assert.match(out, /Cine › Canal Dos .*\n\s+sin guía/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("summarisePlaylist groups as the app: adult and hideGroups hidden, blank group, a repeated tvg-id noticed", () => {
+  const text = "#EXTM3U\n#EXTINF:-1 tvg-id=\"a\" group-title=\"XXX\",X\nhttps://c.example.com/x\n#EXTINF:-1 tvg-id=\"a\" group-title=\"Compras\",Y\nhttps://c.example.com/y\n#EXTINF:-1 tvg-id=\"d\",Z\nhttps://c.example.com/z\n#EXTINF:-1 tvg-id=\"d\",W\nhttps://c.example.com/w\n#EXTINF:-1,W\nhttps://c.example.com/w\n";
+  const s = summarisePlaylist(text, { hideGroups: ["compras"] });
+  assert.deepEqual([s.channels, s.hidden, s.skipped], [2, 2, 1]);
+  assert.deepEqual(s.categories.map((c) => [c.title, c.count]), [["Sin categoría", 2]]);
+  assert.deepEqual(s.duplicateTvgIds, ["d"]);
+  assert.ok(ADULT_GROUPS.includes("xxx"));
+});
+
+test("validate shows the consent lines, the channels line and liveStreamHosts any in red", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "kino-consent-"));
+  try {
+    writeFileSync(join(dir, "kino-plugin.json"), manifest({ apiVersion: 3, capabilities: ["home", "resolve", "channels"], liveStreamHosts: "any" }));
+    writeFileSync(join(dir, "plugin.js"), "export async function home(){ return [] }\nexport async function resolve(){ throw kino.error('not_found') }\nexport async function liveCategories(){ return [] }\nexport async function liveChannels(){ return { items: [] } }");
+    const r = await validate(dir);
+    assert.deepEqual(r.consent, [
+      { text: "Agrega canales en vivo a la pestaña En vivo", danger: false },
+      { text: "Puede reproducir canales desde cualquier servidor que indique su lista", danger: true },
+    ]);
+    const err = (() => { try { execFileSync(process.execPath, [join(here, "..", "validate.mjs"), dir], { encoding: "utf8", stdio: "pipe" }); } catch (e) { return e; } return null; })();
+    assert.equal(err, null);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("validate --run liveCategories downloads and parses each playlist, as the app would", async (t) => {
+  if (!needFixtures(t)) return;
+  const dir = mkdtempSync(join(tmpdir(), "kino-pl-"));
+  const bytes = { "https://cdn.example.com/broken.m3u": readFileSync(join(fixtures, "broken.m3u")), "https://cdn.example.com/empty.m3u": Buffer.from("#EXTM3U\n") };
+  const seen = [];
+  const fetchImpl = async (url, init) => {
+    seen.push([String(url), init.headers["User-Agent"]]);
+    const b = bytes[String(url)];
+    return b ? new Response(b, { status: 200 }) : new Response("no", { status: 404 });
+  };
+  try {
+    // The list's streams are on live.example.com: without it declared every entry is refused.
+    writeFileSync(join(dir, "kino-plugin.json"), manifest({ apiVersion: 3, hosts: ["cdn.example.com", "live.example.com"], capabilities: ["home", "resolve", "channels"] }));
+    const cats = (urls) => `export async function home(){ return [] }\nexport async function resolve(){ return { url: 'https://cdn.example.com/a.m3u8' } }\nexport async function liveCategories(){ return ${JSON.stringify(urls.map((url) => ({ playlist: { url, format: "m3u", headers: { "User-Agent": "Kit/1" } } })))} }\nexport async function liveChannels(){ return { items: [] } }`;
+    writeFileSync(join(dir, "plugin.js"), cats(["https://cdn.example.com/broken.m3u"]));
+    const ok = await validate(dir, { run: "liveCategories", fetchImpl });
+    assert.deepEqual(ok.problems, []);
+    assert.ok(ok.drops.includes("playlist https://cdn.example.com/broken.m3u: 5 entradas descartadas"), ok.drops.join("\n"));
+    assert.deepEqual(seen, [["https://cdn.example.com/broken.m3u", "Kit/1"]]);
+    writeFileSync(join(dir, "kino-plugin.json"), manifest({ apiVersion: 3, hosts: ["cdn.example.com"], capabilities: ["home", "resolve", "channels"] }));
+    const refusedHosts = await validate(dir, { run: "liveCategories", fetchImpl });
+    assert.ok(refusedHosts.problems.some((p) => p.includes("0 canales (8 entradas descartadas")), refusedHosts.problems.join("\n"));
+    writeFileSync(join(dir, "plugin.js"), cats(["https://cdn.example.com/empty.m3u", "https://cdn.example.com/missing.m3u"]));
+    const bad = await validate(dir, { run: "liveCategories", fetchImpl });
+    assert.equal(bad.ok, false);
+    assert.ok(bad.problems.some((p) => p.startsWith("playlist https://cdn.example.com/empty.m3u") && p.includes("0 canales")), bad.problems.join("\n"));
+    assert.ok(bad.problems.some((p) => p.startsWith("playlist https://cdn.example.com/missing.m3u") && p.includes("404")), bad.problems.join("\n"));
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("liveStreamHosts any: a channel's inline stream may be on any public host, never a local one, its subtitles still strict", () => {
+  const m = validateManifest(manifest({ apiVersion: 3, hosts: ["cdn.example.com"], capabilities: ["home", "resolve", "channels"], liveStreamHosts: "any" })).manifest;
+  const page = checkOutput("liveChannels", { items: [
+    { id: "a", title: "A", stream: { url: "http://8.8.8.8/a.m3u8", subtitles: [{ url: "https://subs.example.org/a.vtt", lang: "es" }] } },
+    { id: "b", title: "B", stream: { url: "http://192.168.1.5/b.m3u8" } },
+    { id: "c", title: "C", stream: { url: "https://iptv.example.org/c.m3u8" } },
+  ] }, m);
+  assert.deepEqual(page.value.items.map((c) => c.id), ["a", "c"]);
+  assert.deepEqual(page.value.items[0].stream.subtitles, []);
+  const strict = validateManifest(manifest({ apiVersion: 3, hosts: ["cdn.example.com"], capabilities: ["home", "resolve", "channels"] })).manifest;
+  assert.deepEqual(checkOutput("liveChannels", { items: [{ id: "c", title: "C", stream: { url: "https://iptv.example.org/c.m3u8" } }] }, strict).value.items, []);
+});
+
+test("every guide in the shared corpus has its .expected.json and is checked here", (t) => {
+  if (!needFixtures(t)) return;
+  const guides = readdirSync(fixtures).filter((f) => /\.xml(\.gz)?$/.test(f)).sort();
+  assert.deepEqual(guides, ["guide-doctype-comment.xml", "guide-latin1.xml", "guide-windows1252.xml", "guide-xxe.xml", "guide.xml", "guide.xml.gz"]);
+});
+
+test("run.mjs live playlist --epg says why a guide declaring a DOCTYPE shows nothing", (t) => {
+  if (!needFixtures(t)) return;
+  const out = execFileSync(process.execPath, [join(here, "..", "run.mjs"), "live", "playlist", join(fixtures, "basic.m3u"), "--epg", join(fixtures, "guide-xxe.xml")], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
+  assert.match(out, /La guía declara un DOCTYPE; Kino la rechaza por seguridad/);
+});
+
+// A token-per-channel plugin under liveStreamHosts "any": resolve() of a channel's ref answers a URL
+// on any public host, which the app accepts because the ref is a live channel's.
+function anyLivePlugin(resolveUrl) {
+  const dir = mkdtempSync(join(tmpdir(), "kino-anylive-"));
+  writeFileSync(join(dir, "kino-plugin.json"), manifest({ apiVersion: 3, hosts: ["api.example.com"], capabilities: ["home", "resolve", "channels"], liveStreamHosts: "any" }));
+  writeFileSync(join(dir, "plugin.js"), `export async function home(){ return [] }
+export async function liveCategories(){ return [{ id: "news", title: "Noticias" }] }
+export async function liveChannels(){ return { items: [{ id: "c1", title: "Uno", ref: "r1" }, { id: "c2", title: "Dos", ref: "r2" }] } }
+export async function resolve(ref){ return { url: ${JSON.stringify(resolveUrl)} + "?ref=" + ref } }`);
+  return dir;
+}
+const runCli = (args) => {
+  const r = spawnSync(process.execPath, [join(here, "..", "run.mjs"), ...args], { encoding: "utf8" });
+  return { code: r.status, stdout: r.stdout, stderr: r.stderr };
+};
+
+test("checkOutput resolve: liveStreamHosts any applies only when the ref is a live channel's", () => {
+  const m = validateManifest(manifest({ apiVersion: 3, hosts: ["api.example.com"], capabilities: ["home", "resolve", "channels"], liveStreamHosts: "any" })).manifest;
+  assert.throws(() => checkOutput("resolve", { url: "http://8.8.8.8/a.m3u8" }, m), /no declaró|https/);
+  assert.equal(checkOutput("resolve", { url: "http://8.8.8.8/a.m3u8" }, m, [], { liveChannel: true }).value.url, "http://8.8.8.8/a.m3u8");
+  assert.throws(() => checkOutput("resolve", { url: "http://192.168.1.4/a.m3u8" }, m, [], { liveChannel: true }), /local/);
+});
+
+test("run.mjs resolve: refused by host under any gives the --live hint, and --live accepts it", () => {
+  const dir = anyLivePlugin("http://8.8.8.8/live.m3u8");
+  try {
+    const plain = runCli([dir, "resolve", "r1"]);
+    assert.equal(plain.code, 1);
+    assert.match(plain.stderr, /si este ref es de un canal en vivo, prueba con --live/);
+    const live = runCli([dir, "resolve", "r1", "--live"]);
+    assert.equal(live.code, 0, live.stderr);
+    assert.equal(JSON.parse(live.stdout).url, "http://8.8.8.8/live.m3u8?ref=r1");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("run.mjs live channels resolves the first channel's ref as a live channel", () => {
+  const dir = anyLivePlugin("http://8.8.8.8/live.m3u8");
+  try {
+    const r = runCli([dir, "live", "channels", "news"]);
+    assert.equal(r.code, 0, r.stderr);
+    assert.match(r.stderr, /resolve\(r1\) → http:\/\/8\.8\.8\.8\/live\.m3u8\?ref=r1/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("validate --run liveChannels follows the first ref through resolve as a live channel", async () => {
+  const ok = anyLivePlugin("http://8.8.8.8/live.m3u8");
+  const local = anyLivePlugin("http://192.168.1.4/live.m3u8");
+  try {
+    assert.deepEqual((await validate(ok, { run: "liveChannels", args: ["news"] })).problems, []);
+    const bad = await validate(local, { run: "liveChannels", args: ["news"] });
+    assert.ok(bad.problems.some((p) => p.startsWith("resolve(r1)") && p.includes("local")), bad.problems.join("\n"));
+  } finally {
+    rmSync(ok, { recursive: true, force: true });
+    rmSync(local, { recursive: true, force: true });
+  }
 });

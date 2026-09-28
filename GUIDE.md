@@ -149,10 +149,10 @@ names the field.
 | `id` | Required. `^[a-z0-9][a-z0-9-]{1,39}$` (2 to 40 lowercase letters, digits or hyphens, not starting with a hyphen). Not one of `magis`, `ditu`, `live`, `local`, `unknown`, `plugin`. It is the plugin's identity: never change it once people have installed it. |
 | `name` | Required. 1 to 40 characters. |
 | `version` | Required. `MAJOR.MINOR.PATCH` and nothing else (no `-beta`, no `+build`), each number up to 6 digits and without leading zeros. |
-| `apiVersion` | Required. `1` or `2`. A higher number than Kino supports is refused with "Este plugin necesita una versión más nueva de Kino". Declare `2` only if you use something that needs it (below); otherwise stay on `1` so your plugin also runs on older Kino builds. |
+| `apiVersion` | Required. `1`, `2` or `3`. A higher number than Kino supports is refused with "Este plugin necesita una versión más nueva de Kino". Declare `2` only if you use something that needs it (below); otherwise stay on `1` so your plugin also runs on older Kino builds. |
 | `entry` | Required. Relative path of the JavaScript file: letters, digits, `.`, `_`, `-` and `/` only, no `..`, at most 200 characters, ends in `.js`. The file is at most 1 MB. |
-| `hosts` | Required. 1 to 20 entries; each a lowercase DNS name (`archive.org`), `*.` plus a DNS name (`*.archive.org`), or (apiVersion 2 only) an object `{ "host": "…", "insecureHttp": true }` (below). Host names only: no scheme, port or path. No bare `*`, no IP addresses, no `localhost`, nothing ending in `.local`, `.lan`, `.internal`, `.localhost` or `.home.arpa`, and at least one dot. **`*.x` covers subdomains only, not `x` itself**: if you need both, list both. |
-| `capabilities` | Required. A subset of `search`, `home`, `browse`, `episodes`, `resolve`, `download`, `drm`. Must include `resolve` and at least one of `search` or `home`. `search`, `home`, `browse`, `episodes` and `resolve` must each be an exported function of the entry file, or the install fails with "El plugin no carga: le falta ...". `download` and `drm` need `apiVersion: 2` and are declarative flags instead — the app acts on them, not your code, so nothing extra to export; declaring one shows its consent line ("Puede descargar videos para verlos sin conexión" / "Reproduce video protegido (DRM)") and needs approval again on an update that adds it. `download` gives your titles offline downloads (see [Downloads](#downloads-apiversion-2)); `drm` lets a `Stream` carry a Widevine license (see [A Widevine-protected stream](#a-widevine-protected-stream-apiversion-2)). |
+| `hosts` | Required. 1 to 20 entries (from apiVersion 2 it may be empty, `[]`, when the plugin has a `url` setting: see [The person's own servers](#the-persons-own-servers)); each a lowercase DNS name (`archive.org`), `*.` plus a DNS name (`*.archive.org`), or (apiVersion 2 only) an object `{ "host": "…", "insecureHttp": true }` (below). Host names only: no scheme, port or path. No bare `*`, no IP addresses, no `localhost`, nothing ending in `.local`, `.lan`, `.internal`, `.localhost` or `.home.arpa`, and at least one dot. **`*.x` covers subdomains only, not `x` itself**: if you need both, list both. |
+| `capabilities` | Required. A subset of `search`, `home`, `browse`, `episodes`, `resolve`, `download`, `drm`, `channels`. Must include `resolve` and at least one of `search` or `home`. `search`, `home`, `browse`, `episodes` and `resolve` must each be an exported function of the entry file, or the install fails with "El plugin no carga: le falta ...". `download` and `drm` need `apiVersion: 2` and are declarative flags instead — the app acts on them, not your code, so nothing extra to export; declaring one shows its consent line ("Puede descargar videos para verlos sin conexión" / "Reproduce video protegido (DRM)") and needs approval again on an update that adds it. `download` gives your titles offline downloads (see [Downloads](#downloads-apiversion-2)); `drm` lets a `Stream` carry a Widevine license (see [A Widevine-protected stream](#a-widevine-protected-stream-apiversion-2)). `channels` needs `apiVersion: 3` and the exports `liveCategories` and `liveChannels` (see [Channels in the En vivo tab](#channels-in-the-en-vivo-tab-apiversion-3)). |
 | `settings` | Optional. What the person fills in on your plugin's "Configurar" screen: see below. |
 | `permissions` | Optional. A list of names from the closed list in `contract.json`. **The list is empty in this version**: any name is refused with "permiso desconocido: …". It exists so a later version can add permissions (each one shown on the consent screen) without a new `apiVersion`. |
 | `color` | Optional `#RRGGBB`: the accent of your plugin's tab and chips. A neutral color by default. |
@@ -160,7 +160,8 @@ names the field.
 | `description`, `author`, `homepage` | Optional strings. Trimmed and cut to 300, 60 and 200 characters. Kino shows the name, author, version and description when it asks the person to install. |
 
 Other keys are ignored. `hosts` does three jobs: it is what the person approves, it is the only set
-of sites `kino.fetch` can reach, and it is the set your stream and subtitle URLs must be on.
+of sites `kino.fetch` can reach, and it is the set a `Stream`'s URLs must be on: the video, its
+subtitles, its `audioTracks` and a `drm` block's `licenseUrl` (besides the person's own server).
 
 ### Settings
 
@@ -216,6 +217,14 @@ may only go to the same server or to your declared `hosts`, and your stream and 
 at it. The consent screen warns "Se conectará a los servidores que escribas en su configuración", and
 Ajustes lists what each plugin reaches ("Se conectará a: …").
 
+A plugin whose **only** reach is that server (it never calls a site of its own) declares
+`"hosts": []` from `"apiVersion": 2`, as long as it has at least one `url` setting: the consent
+screen then lists no host at all, only the line about the servers the person types, and Ajustes says
+"Se conectará solo a los servidores que escribas en su configuración" until one is typed. An empty
+`hosts` with no `url` setting is refused (`El campo "hosts" solo puede estar vacío si el plugin
+tiene un ajuste de tipo "url"`), and on `"apiVersion": 1` it is refused as always. (Kino never lists
+a host under the reserved `.invalid` domain either, the placeholder older manifests used.)
+
 Only the scheme, host and port count: any path on that server is reachable, and
 `kino.config.get` returns the value as typed. Kino refuses, with a message under the field, a value
 that is not an `http`/`https` URL, or whose host is `localhost`, a loopback address (`127.0.0.1`,
@@ -267,7 +276,9 @@ What downloads, and what does not:
   those titles play but do not download.
 - The queue downloads one title at a time, so a `ref` may wait a while before `resolve` is called:
   keep something stable in it and look the fresh link up inside `resolve` (as recommended above). A
-  retry resumes the partial file even when your URL changed.
+  retry resumes the partial file even when your URL changed. A `resolve` the queue makes that times
+  out fails that download only: it does not count toward the three timeouts in a row that switch
+  your plugin off ("No responde"), which only calls made for the person on screen do.
 - A plugin that is disabled, waiting for its settings, or uninstalled downloads nothing: its titles
   show no download button, and a title already queued fails with "Este plugin ya no puede descargar
   videos". Files already downloaded keep playing offline and stay removable in Descargas, whatever
@@ -307,7 +318,9 @@ What Kino does with a `live` item:
   `ref`, exactly as for a movie.
 - The `Stream` plays as live: an HLS or DASH live manifest (`.m3u8`/`.mpd`) is what the player
   expects; a progressive file plays too but reads as a channel (no seek bar, no length). `headers`,
-  `subtitles`, `audioTracks` and `expiresInSeconds` work as for any stream; `durationMs` is ignored.
+  `subtitles` and `expiresInSeconds` work as for any stream; `durationMs` and `audioTracks` are
+  ignored (a separate audio file cannot follow a live window: put a channel's other languages inside
+  its manifest, e.g. HLS `EXT-X-MEDIA` renditions, and the player's audio menu offers them).
 - The player shows the live overlay (no progress bar, no seeking, no "next") and starts at the live
   edge. If it falls behind the live window, or the playlist resets or stalls, it re-joins the live
   edge in place without calling you (a few times a minute). On any other cut, or when your URL
@@ -321,10 +334,62 @@ What Kino does with a `live` item:
 
 Limits: a `live` item from a plugin on `"apiVersion": 1` is dropped silently, like any invalid
 item (and a row left with no items disappears), so declare `2` before you return one. A channel
-still counts against the same row and page sizes as any item. Kino's own "Canales en vivo" row is
-native and separate: your channels appear in your rows, with your plugin's name.
+still counts against the same row and page sizes as any item. These channels appear in your rows,
+with your plugin's name; to put channels in Kino's En vivo tab and its "Canales en vivo" row, use
+the apiVersion 3 `channels` capability ([below](#channels-in-the-en-vivo-tab-apiversion-3)).
 
-## 4. The contract (apiVersion 1 and 2)
+### Channels in the En vivo tab (apiVersion 3)
+
+Declare `"apiVersion": 3` and the capability `"channels"`, and export `liveCategories()` and
+`liveChannels({ categoryId, cursor })` (and, optionally, `guide(...)`, see §4). Your channels then
+appear in Kino's own En vivo tab, TV guide, channel drawer and Home "Canales en vivo" row, in a
+section with your plugin's name. `channels` does not replace `search`/`home`: the manifest still
+needs one of them (a plugin with only channels exports a `home()` that returns `[]`). Items of kind
+`"live"` in your rows keep working; a plugin can do both. On install, and on an update that adds it,
+the person reads and approves "Agrega canales en vivo a la pestaña En vivo".
+
+### Channels from any server (`liveStreamHosts`, apiVersion 3)
+
+IPTV lists name their streams on servers you cannot know ahead of time, often plain `http` and
+often a bare public IP. For that, and only that, a `channels` plugin may add:
+
+```json
+"apiVersion": 3,
+"capabilities": ["home", "resolve", "channels"],
+"liveStreamHosts": "any"
+```
+
+It is read only with `"apiVersion": 3` (an older manifest ignores it, like any field it does not
+know). There, `"any"` is the only value and it needs the `channels` capability: otherwise the
+manifest is refused with `El campo "liveStreamHosts" solo admite "any"` or
+`"liveStreamHosts" necesita la capacidad "channels"`.
+
+What it allows: **a live channel's stream** (the `url` of a channel's inline `stream`, or the `url`
+`resolve` returns for a channel; items you mark as live are treated as channels) may be on **any
+public host**, over `http` or `https`, a public IPv4 address included (not an IPv6 literal). The player then fetches that manifest and
+its variants, segments and keys, and follows their redirects, under the same rule. The audio and
+subtitle renditions the HLS manifest itself lists (`#EXT-X-MEDIA`) are part of that stream and follow
+the same rule too; the `subtitles` and `audioTracks` you return in a `Stream` do not (see below).
+
+What it never allows:
+
+- the home network: private, loopback, link-local and carrier-grade NAT addresses, IPv6 literals,
+  `localhost` and local names (`.local`, `.lan`, …), and a public name that resolves into any of
+  them (refused when the player connects);
+- other ports or schemes of a server the person typed: that server is reached exactly as typed,
+  never "any";
+- `kino.fetch`: your own requests still reach only your `hosts` and the person's servers;
+- the playlist and XMLTV downloads a `{ playlist }` declaration asks Kino to make: those URLs must
+  still be on your `hosts` (or the person's server);
+- subtitles, audio tracks and a `drm` block's `licenseUrl`: still your `hosts` only, and every
+  redirect they make is judged the same way;
+- movies and episodes: a non-live `Stream` is checked exactly as before;
+- images: the poster rule (https, never local) does not change.
+
+The consent sheet shows it in red, "Puede reproducir canales desde cualquier servidor que indique su
+lista", and an update that newly adds it waits for the person's approval, like a new host.
+
+## 4. The contract (apiVersion 1, 2 and 3)
 
 Your entry file is one ES module that exports one `async` function for each capability you
 declared, and nothing is called that you did not declare:
@@ -335,6 +400,9 @@ export async function home() { /* -> Row[] */ }
 export async function browse(ref, cursor) { /* -> Page */ }
 export async function episodes(ref) { /* -> { series?: SeriesInfo, episodes: Episode[], seasons?: Season[] } */ }
 export async function resolve(ref) { /* -> Stream */ }
+export async function liveCategories() { /* -> Array<LiveCategory | Playlist> or Playlist */ }
+export async function liveChannels({ categoryId, cursor }) { /* -> { items: LiveChannel[], next? } */ }
+export async function guide({ channelIds, from, to }) { /* -> GuideEntry[] */ }
 ```
 
 (`kino.d.ts` has the same shapes as TypeScript declarations.)
@@ -431,7 +499,7 @@ all or nothing.
 | `seasons` (in the `episodes` result) | Optional; at most 50. Each needs an `id` (same pattern as an item id; a repeated one is dropped), a non-empty `ref` of at most 4096 characters and a non-blank `title` (up to 200 characters), or it is dropped. `number` from 1 to 999 and `current` a boolean; a wrong one is ignored, not the season. Anything that is not a list is ignored. |
 | `id` | `^[A-Za-z0-9._~-]{1,128}$`. Anything else drops the item, so if your source's own ids have other characters (spaces, `/`, `:`, `%`), derive a stable id yourself, such as a slug. Repeated ids in one list are dropped. |
 | `ref` | A non-empty string of at most 4096 characters. |
-| `kind` | `"movie"` or `"series"`. A `series` item from a plugin that does not declare `episodes` is dropped: it could never be opened. |
+| `kind` | `"movie"`, `"series"` or (apiVersion 2) `"live"`. A `series` item from a plugin that does not declare `episodes` is dropped: it could never be opened; a `live` item from an apiVersion 1 plugin is dropped too (see [Live channels](#live-channels-apiversion-2)). |
 | Text fields | `title` is required and non-blank, up to 200 characters. `overview` up to 2000; `lang` and `quality` up to 20 (for example `"es"`, `"1080p"`); `year` up to 10 (a number is accepted and converted). Longer text is cut; the text of `SeriesInfo` and `Episode` is cut the same way (200 characters for titles, 2000 for overviews). |
 | Extra item fields | All optional; a wrong one is ignored, not the item. `genres` at most 5, each at most 30 characters; `badges` (shown as chips, e.g. `"HD"`, `"Latino"`) at most 3 of at most 20; `rating` from 0 to 10; `runtimeMinutes` from 1 to 1000; `ids.tmdb` a positive integer (Kino uses it to match your title with TMDB, to find it again from search, and to enrich its info page -- see below); `ids.imdb` matches `^tt\d{5,10}$` (also enriches a movie's info page when you have no `ids.tmdb`). An episode's `airDate` is `YYYY-MM-DD`. |
 | `adult` | An item with `adult: true` is dropped: Kino has no place behind its 18+ lock for plugin titles yet. |
@@ -481,7 +549,7 @@ It does **not** add a poster, a backdrop or seasons from TMDB -- those stay exac
 - `audioTracks`: at most 8, each `{ lang, url, label? }` -- a dub or an alternate mix your source
   serves as its own file, separate from the video. Checked exactly like a subtitle: `url` must be
   `https` on a declared host, or the person's own server exactly as typed; a bad entry is dropped and
-  the rest of the stream still plays. `lang` up to 16 characters (blank becomes `"und"`); `label`, up
+  the rest of the stream still plays, and so is a `url` already listed (the first entry wins). `lang` up to 16 characters (blank becomes `"und"`); `label`, up
   to 40 characters, is shown in the audio menu verbatim when given, instead of a name guessed from
   `lang`. Kino merges each one into the video and offers it, auto-picked by the person's audio
   preference, in the same menu as the container's own embedded tracks. A stream with no `audioTracks`
@@ -506,6 +574,71 @@ It does **not** add a poster, a backdrop or seasons from TMDB -- those stay exac
   `licenseHeaders` are filtered like `headers` (at most 20) and sent with the license request only.
   The other five keys are refused even next to a valid `drm` block. See
   [A Widevine-protected stream](#a-widevine-protected-stream-apiversion-2).
+
+#### Live channels (apiVersion 3)
+
+With the `channels` capability ([§3](#channels-in-the-en-vivo-tab-apiversion-3)) Kino calls three
+more functions. Their arguments:
+
+- `liveCategories()` gets `null`.
+- `liveChannels({ categoryId, cursor })` gets the `id` of one of your categories, and `cursor` `null`
+  for the first page or the `next` of the page before.
+- `guide({ channelIds, from, to })` gets at most 50 of your channel ids and a window of at most
+  24 hours: `from` and `to` are epoch milliseconds.
+
+They return:
+
+```ts
+LiveCategory = { id: string, title: string, country?: string, adult?: boolean }
+Playlist     = { playlist: { url: string, format: "m3u", headers?: Record<string, string>,
+                             epg?: { url: string, format: "xmltv" }, refreshHours?: number,
+                             hideGroups?: string[], resolve?: boolean } }
+LiveChannel  = { id: string, title: string, categoryId: string, ref?: string, stream?: Stream,
+                 logo?: string, number?: number, adult?: boolean }
+GuideEntry   = { channelId: string, title: string, start: number, end: number, description?: string }
+```
+
+A plugin can give its channels in three ways, and mix them:
+
+1. **A channel with a `ref`.** The `ref` goes to `resolve(ref)` when the person plays it, exactly
+   like a `live` item's, and its Stream plays as live.
+2. **A channel with an inline `stream`.** A `Stream` checked by the same rules as `resolve()`'s
+   answer; it plays with no call to your plugin. A channel whose `stream` is refused is dropped. With
+   both `ref` and `stream`, the stream plays and the `ref` is only the fallback. A channel with
+   neither is dropped.
+3. **A playlist.** Put `{ playlist: { ... } }` entries next to your categories in the
+   `liveCategories()` answer (or return one alone). Kino downloads the M3U list itself, and its XMLTV
+   guide from `epg.url`, and groups the entries into categories. Both URLs must be `https` on one of
+   your `hosts` (or `http` on one declared `insecureHttp`, or a server the person typed), always:
+   a playlist on another host is dropped, and an `epg` on another host only loses the guide.
+   `headers` go with those downloads. `refreshHours` is 1 to 168 (default 12); `hideGroups` lists
+   group titles not to show (case doesn't matter, at most 50). With `resolve: true`, each entry plays
+   through your `resolve(<entry url>)`, for lists whose links need a fresh token. At most 10 per
+   answer.
+
+   Each entry gets a channel code, the key of favourites and recents: its `tvg-id` when that is a
+   valid id **used by no other entry of the list**, else one made from its URL and name. So a
+   channel's code can change between refreshes: when the list later gains a second entry with the
+   same `tvg-id`, both switch to URL-and-name codes, and favourites and recents saved under the old
+   code stop matching (the same happens to a URL-and-name code when the URL changes). Give every
+   entry a stable, unique `tvg-id`; `node sdk/run.mjs live playlist <list>` lists the repeated ones.
+
+The rules:
+
+- Times are epoch milliseconds.
+- At most 200 categories (playlists don't count), and at most 500 channels per `liveChannels` page.
+  `id` follows the item `id` pattern; an `id` starting with `~` is reserved for Kino's own playlist
+  entries and dropped. A repeated `id` in one answer is dropped. `title` is required.
+- `country` is an ISO 3166 two-letter code (`"CO"`), informational; anything else is ignored.
+  `number` is 1 to 9999 (anything else counts as no number); `logo` follows the poster rules;
+  a `categoryId` that is not a valid id becomes empty.
+- Kino pages `liveChannels` until `next` is missing, repeats, or brings nothing new, at most 10
+  pages per category.
+- Kino caches your categories and channels for 1 hour and your guide for 30 minutes.
+- `guide` is optional. Kino keeps entries for the channels it asked for, with `end` after `start`,
+  inside the window, at most 100 per channel and one per start time. A `guide` that fails or is not
+  exported is simply not asked again for 30 minutes: your channels still list.
+- An `adult: true` category or channel is dropped.
 
 ### Errors people understand
 
@@ -779,7 +912,7 @@ does anything with season numbers or ordering: how a backend spells "season 2" i
 | --- | --- |
 | Manifest / entry file / icon | 16 KB / 1 MB / 128 KB |
 | Memory / stack, per plugin | 64 MB / 1 MB |
-| Time per call | `search` 15 s; `home`, `browse`, `episodes`, `resolve` 20 s each, counting all your fetches and sleeps together |
+| Time per call | `search` 15 s; `home`, `browse`, `episodes`, `resolve` 20 s each; `liveCategories`, `liveChannels`, `guide` 20 s each; counting all your fetches and sleeps together |
 | Loading the module (its top level) | 10 s |
 | Idle sandbox | closed after 5 minutes without calls |
 | Consecutive timeouts | 3 in a row and Kino disables the plugin ("No responde") |
@@ -791,9 +924,10 @@ does anything with season numbers or ordering: how a backend spells "season 2" i
 | `kino.log` / `console.*` | 2,000 characters per message |
 | What a function returns | at most 2,000,000 characters once turned into JSON |
 | Results | `search` 100 items; `home` 20 rows of 60; `browse` 100 per page; `episodes` 5,000 (and 50 `seasons`); `ref` 4,096 characters; `next` 2,048 characters; `id` matches `^[A-Za-z0-9._~-]{1,128}$` |
+| Live channels (apiVersion 3) | `liveCategories` 200; `liveChannels` 500 per page and 10 pages per category; `guide` 50 channels and 24 h per call, 100 entries per channel; `number` 1..9999 |
 | Settings | at most 12; `text` 500, `url` 2,048, `password` 500 characters |
 | Error messages | your `kino.error` message is shown as a detail, cut at 200 characters |
-| `hosts` | 1 to 20 entries |
+| `hosts` | 1 to 20 entries; from apiVersion 2, none (`[]`) when a `url` setting exists |
 <!-- contract:limits:end -->
 
 ### How your code lives
@@ -925,20 +1059,63 @@ throws and 2 when the command is wrong. The runner only runs functions your mani
   `.kino-cookies.json`, both next to your manifest. Add them to your `.gitignore`. Delete them to
   start from scratch.
 - `node sdk/validate.mjs <folder>` checks the manifest with every rule of section 3 (the same
-  Spanish messages the app shows) and that each declared capability is exported;
-  `--run <function> [argument]` also runs it and lists what Kino would drop. Exit code 0 means Kino
-  would accept it.
+  Spanish messages the app shows) and that each declared capability is exported, and prints the
+  consent sheet's extra lines as the person will read them (the red ones, an `insecureHttp` host or
+  `"liveStreamHosts": "any"`, marked "(en rojo)");
+  `--run <function> [argument]` also runs it and lists what Kino would drop. With
+  `--run liveCategories`, every declared playlist is downloaded and parsed too: one that cannot be
+  downloaded or parses to 0 channels is a problem, and its discarded entries are listed. Exit code 0
+  means Kino would accept it.
 - The `sdk/` folder does not have to live in your repository. Copy it anywhere and run
   `node /path/to/sdk/run.mjs ./plugin.js ...`.
 - A stack trace names a temporary `plugin.mjs`: the runner loads a copy of your file so that Node
   treats it as an ES module whatever its version and `package.json` say. The line numbers are your
   `plugin.js`'s.
 
+**Live channels** (apiVersion 3). The `channels` exports run through `live`, with the plugin folder
+first:
+
+```
+node sdk/run.mjs . live categories
+node sdk/run.mjs . live channels noticias
+node sdk/run.mjs . live channels noticias 2
+node sdk/run.mjs . live guide canal1,canal2
+node sdk/run.mjs live playlist https://iptv-org.github.io/iptv/countries/co.m3u
+node sdk/run.mjs live playlist ./lista.m3u --epg ./guia.xml.gz
+```
+
+- `live categories` calls `liveCategories()` and prints what Kino keeps. Then, for each `{ playlist }`
+  in the answer, it downloads the list as the app would (your `headers`, your `hosts` or the person's
+  server only, every redirect too) and prints, on stderr, the same summary as `live playlist` and
+  the list's groups as the categories people will see.
+- `live channels <categoryId> [cursor]` calls `liveChannels({ categoryId, cursor })`, then plays the
+  first channel that has a `ref` and no `stream` the way Kino would: it sends that `ref` to
+  `resolve()` and checks the answer as a live channel's (so `"liveStreamHosts": "any"` applies). With
+  `validate.mjs --run liveChannels`, a refused answer there is a problem.
+- `resolve <ref> --live` checks a `resolve()` answer as a live channel's. Without `--live` the kit
+  cannot know the `ref` is a channel's and applies the strict rule; when only that stops the URL
+  and your manifest has `"liveStreamHosts": "any"`, it says "si este ref es de un canal en vivo,
+  prueba con --live".
+- `live guide <id,id>` calls `guide()` with those ids and a 24-hour window starting two hours ago.
+- `live playlist <url|file>` needs no plugin: it reads any M3U list with Kino's own rules and prints
+  `N canales en M categorías; K entradas descartadas; L ocultas (adultos)`, the categories, and the
+  first 20 channels as `group › name  url`. With `--epg <url|file>` it also shows what each of those
+  20 has on now, or "sin guía". A guide that declares a DOCTYPE is refused, as in the app, and the
+  command says so: "La guía declara un DOCTYPE; Kino la rechaza por seguridad". Use it on a list
+  before you write a line of plugin.
+
+The kit reads lists and guides with `sdk/live-playlist.mjs`, a copy of the app's readers pinned to
+the same test files (`docs/plugins/fixtures/live` in Kino's repository): what it keeps is what Kino
+keeps.
+
 **What the Node kit does not reproduce.** Kino is the authority; the kit only approximates it so
 you can iterate fast. Before you publish, install the plugin in the app and try it there. The
 differences:
 
 - `kino.html.select` throws (it uses Jsoup, which exists only in the app).
+- The kit's XMLTV reader is a tolerant regex walk, not the app's XML parser. It gives the app's answer
+  on every shared test guide, but on malformed XML in mid-document it may keep more than the app
+  (which stops at the first error and keeps what it read up to there).
 - The rejection trap of [section 6](#6-limits-and-engine-quirks): Node catches what Kino would not.
 - Node has globals Kino lacks (`setTimeout`, `fetch`, `Buffer`, ...): the plugin may pass under Node
   and fail in Kino. Kino's `URL` has no punycode.
@@ -994,12 +1171,13 @@ Before you publish, check that:
 ## 9. What people see
 
 - **The consent sheet.** When someone types your address, Kino shows "Instalar <name>", your version
-  and author, the description, the list of hosts under "Se va a conectar con:", and the warning
+  and author, the description, the list of hosts under "Se va a conectar con:" (left out when
+  `hosts` is empty), and the warning
   "Plugin no verificado: solo instálalo si confías en quien lo hizo." with "Instalar" and "Cancelar".
   If your manifest has a `password` setting it adds "Este plugin usa tu usuario y contraseña"; a `url`
   setting adds "Se conectará a los servidores que escribas en su configuración". Declaring `download`
   adds "Puede descargar videos para verlos sin conexión", `drm` adds "Reproduce video protegido (DRM)",
-  and each `insecureHttp` host adds, in red, "Conexión sin cifrar con <host>". Nothing of yours runs
+  `channels` adds "Agrega canales en vivo a la pestaña En vivo", each `insecureHttp` host adds, in red, "Conexión sin cifrar con <host>", and `liveStreamHosts: "any"` adds, in red, "Puede reproducir canales desde cualquier servidor que indique su lista". Nothing of yours runs
   before they accept.
 - **Configurar.** A plugin with `settings` has a "Configurar" button in Ajustes ▸ Plugins. Until
   every required setting has a value its status is "Falta configurar" and nothing of it runs.
@@ -1057,7 +1235,7 @@ episodes numbered 0 are dropped), so do not copy those as intended behavior.
 ## 11. Cookbook
 
 Three complete shapes, then two short recipes for the apiVersion 2 powers that need a line on the
-consent sheet. The first and the third shapes are, nearly line for line, the two reference plugins
+consent sheet, and three for live channels (apiVersion 3). The first and the third shapes are, nearly line for line, the two reference plugins
 Kino's own tests run end to end against a fake server.
 
 ### An HTML site with a login and hidden links
@@ -1187,28 +1365,45 @@ kino.error("not_found"); }` is enough when only search pages.
 
 ### The person's own server
 
-A media server at home: the person types its address, user and password. The address becomes an
-allowed host, `http` included; streams and posters may point at it.
+A media server at home (Jellyfin, Emby, a NAS…): the person types its address, user and password.
+The address becomes an allowed host for that install, `http` and a LAN address included; streams,
+posters and stills may point at it. This is the published demo plugin **Tu servidor**
+([kinotvapp/kino-plugin-own-server](https://github.com/kinotvapp/kino-plugin-own-server), with a
+reference server to run it against), which uses every apiVersion 3 feature a server of your own
+can: seasons, `download`, `audioTracks`, `live` items, a `kino.storage` TTL, `kino.rank`,
+`ids.tmdb`, and `channels` in all three shapes (channels with a `ref`, channels with an inline
+`stream`, and an M3U playlist with an XMLTV guide).
 
 ```json
 {
-  "id": "mi-servidor", "name": "Mi servidor", "version": "1.0.0", "apiVersion": 1, "entry": "plugin.js",
-  "hosts": ["example.org"],
-  "capabilities": ["search", "home", "browse", "resolve"],
+  "id": "own-server", "name": "Tu servidor", "version": "1.2.0", "apiVersion": 3, "entry": "plugin.js",
+  "hosts": [],
+  "capabilities": ["search", "home", "browse", "episodes", "resolve", "download", "channels"],
   "settings": [
     { "key": "server", "label": "Servidor", "type": "url", "required": true, "hint": "http://192.168.1.10:8096" },
     { "key": "user", "label": "Usuario", "type": "text", "required": true },
-    { "key": "password", "label": "Contraseña", "type": "password", "required": true }
+    { "key": "password", "label": "Contraseña", "type": "password", "required": true },
+    { "key": "hd", "label": "Solo HD", "type": "toggle" }
   ]
 }
 ```
 
-`hosts` still needs one entry; use your project's own site. Then:
+`hosts` is empty: the plugin reaches only the server the person types (allowed from apiVersion 2
+with a `url` setting, see [The person's own servers](#the-persons-own-servers)). Up to 1.1.1 the
+demo declared the placeholder `"tu-servidor.invalid"` for Kino builds from before that rule; 1.2.0
+is apiVersion 3, which those builds refuse anyway, so it declares none. Every channel list, guide
+and stream is on that same server, so it needs no `"liveStreamHosts": "any"`. Then:
 
 ```js
 const base = () => String(kino.config.get("server")).replace(/\/+$/, "");
-// The token belongs to one user on one server: changing either in Configurar ignores the old one.
-const tokenKey = () => "token:" + kino.config.get("user") + "@" + base();
+
+// Everything cached in kino.storage belongs to one user on one server: storage survives a change
+// in Configurar, so a key without them would hand the old server's answers to the new one.
+const scope = () => kino.config.get("user") + "@" + base();
+
+// The token does NOT change when only the password changes for the same user@server -- a
+// still-valid token keeps working, exactly like a real session would, until the server rejects it.
+const tokenKey = () => "token:" + scope();
 
 async function token() {
   await null;
@@ -1225,41 +1420,155 @@ async function token() {
   return t;
 }
 
+// Every request goes through here, so a token invalidated server-side (expired, revoked, or a
+// stale one from before a real password change) is forgotten and asked for again on the next call.
 async function api(path) {
   const r = await kino.fetch(base() + path, { headers: { "X-Token": await token() } });
   if (r.status === 401) { kino.storage.remove(tokenKey()); throw kino.error("auth_required", "la sesión venció"); }
   if (r.status === 404) throw kino.error("not_found");
+  if (r.status === 429) throw kino.error("rate_limited");
+  if (r.status === 451) throw kino.error("geo_blocked");
   if (!r.ok) throw kino.error("unavailable", "el servidor respondió " + r.status);
   return r.json();
 }
 
+// Artwork lives on the same typed server, so `http` and a LAN address are fine here too. Posters
+// are 2:3 (the cards), backdrops 16:9 (the info page's background, and each episode's still).
+const art = (shape, id) => base() + "/img/" + shape + "/" + encodeURIComponent(id) + ".png";
+const poster = (id) => art("poster", id);
+const backdrop = (id) => art("backdrop", id);
+
+// `kind` comes from the server: "movie", "series" (one season of a show) or "live" (apiVersion 2).
+// `ids.tmdb` only when the server knows it: Kino then matches the title with TMDB and fills in its
+// info page (cast, director, tagline...).
 const item = (x) => ({
-  id: x.id, ref: x.id, title: x.title, kind: "movie", year: x.year,
-  poster: base() + "/img/" + encodeURIComponent(x.id),
+  id: x.id,
+  ref: x.id,
+  title: x.title,
+  kind: x.kind,
+  year: x.year,
+  poster: poster(x.id),
+  backdrop: backdrop(x.id),
+  ids: x.tmdb ? { tmdb: x.tmdb } : undefined,
 });
 
+// Home rows, one per kind; each row's ref is the kind, which browse() pages through.
+const ROWS = [
+  { id: "novedades", title: "Novedades", kind: "movie" },
+  { id: "series", title: "Series", kind: "series" },
+  { id: "en-vivo", title: "En vivo", kind: "live" },
+];
+
+// Home asks the server three times; the answer is kept for 15 minutes with a storage TTL, so
+// opening Kino again right away costs no request. An expired entry reads as null by itself.
+const HOME_TTL_MS = 15 * 60 * 1000;
+
 export async function home() {
-  const p = await api("/items?limit=10");
-  return [{ id: "all", title: "En tu servidor", ref: "all", items: p.items.map(item) }];
+  const key = "home:" + scope();
+  const cached = kino.storage.get(key);
+  if (cached) return JSON.parse(cached);
+  const rows = [];
+  for (const row of ROWS) {
+    const p = await api("/items?limit=10&kind=" + row.kind);
+    if (p.items.length) rows.push({ id: row.id, title: row.title, ref: row.kind, items: p.items.map(item) });
+  }
+  kino.storage.set(key, JSON.stringify(rows), { ttlMs: HOME_TTL_MS });
+  return rows;
 }
 
 export async function browse(ref, cursor) {
-  const p = await api("/items?limit=10" + (cursor ? "&cursor=" + encodeURIComponent(cursor) : ""));
+  const p = await api("/items?limit=10&kind=" + encodeURIComponent(ref) + (cursor ? "&cursor=" + encodeURIComponent(cursor) : ""));
   return { items: p.items.map(item), next: p.next || undefined };
 }
 
+// The server matches ANY word of the query, so "Serie de prueba" also brings "Video de prueba 1".
+// kino.rank turns that into a title search: ask with the title's head, drop the stray-word hits,
+// best match first -- trying every form of the title Kino knows.
 export async function search(query) {
-  return (await api("/items?q=" + encodeURIComponent(query.q))).items.map(item);
+  if (!query.q.trim()) return [];
+  const titles = [query.q, query.originalTitle, ...(query.altTitles || [])].filter(Boolean);
+  const found = (await api("/items?limit=50&q=" + encodeURIComponent(kino.rank.shortQuery(query.q)))).items;
+  const relevant = kino.rank.filterRelevant(found, titles);
+  return kino.rank.sortBySimilarity(relevant, titles).map(item);
 }
 
+// Each season is its own title on this server, so the answer lists every season of the show in
+// `seasons` (the one being answered marked `current`): Kino shows them as chips and calls
+// episodes() again with the chosen season's ref.
+export async function episodes(ref) {
+  const x = await api("/items/" + encodeURIComponent(ref));
+  if (x.kind !== "series") throw kino.error("not_found");
+  return {
+    series: { title: x.show.title, overview: x.show.overview, poster: poster(x.id), backdrop: backdrop(x.id) },
+    episodes: x.episodes.map((e) => ({ season: x.season, number: e.number, ref: e.id, title: e.title, still: backdrop(e.id) })),
+    seasons: x.seasons.map((s) => ({
+      id: s.id,
+      ref: s.id,
+      title: "Temporada " + s.number,
+      number: s.number,
+      current: s.id === x.id,
+    })),
+  };
+}
+
+// Movies and episodes are progressive mp4 files, so with `download` declared Kino can save them;
+// the live channel is HLS and plays as live (never downloadable). A movie with a separate audio
+// file gets it as an `audioTracks` entry, merged by the player and picked in its audio menu.
 export async function resolve(ref) {
   const x = await api("/items/" + encodeURIComponent(ref));
-  return { url: base() + x.stream, mime: "video/mp4", expiresInSeconds: 600 };
+  if (x.kind === "live") return { url: base() + x.stream, mime: "application/vnd.apple.mpegurl" };
+  const hd = kino.config.get("hd");
+  const stream = {
+    url: base() + x.stream + (hd ? "?quality=hd" : ""),
+    mime: "video/mp4",
+    // The stream URL is short-lived on the reference server: resolve again once it is stale.
+    expiresInSeconds: 600,
+  };
+  if (x.audio && x.audio.length) {
+    stream.audioTracks = x.audio.map((a) => ({ lang: a.lang, label: a.label, url: base() + a.stream }));
+  }
+  return stream;
+}
+
+// channels (apiVersion 3), all three shapes in one answer: Noticias with a `ref` (played through
+// resolve() above), Deportes with an inline `stream` (no plugin call on play), and a playlist Kino
+// downloads and parses itself, sent with the token and hiding one group.
+export async function liveCategories() {
+  const categories = await api("/channels/categories");
+  return [
+    ...categories,
+    { playlist: {
+      url: base() + "/lista.m3u", format: "m3u",
+      headers: { "X-Token": await token() },
+      epg: { url: base() + "/guia.xml.gz", format: "xmltv" },
+      refreshHours: 1,
+      hideGroups: ["Compras"],
+    } },
+  ];
+}
+
+export async function liveChannels({ categoryId }) {
+  const page = await api("/channels?category=" + encodeURIComponent(categoryId));
+  return {
+    items: page.items.map((c) => {
+      const channel = { id: c.id, title: c.title, number: c.number, categoryId: c.categoryId, logo: poster(c.id) };
+      if (categoryId === "deportes") channel.stream = { url: base() + "/live/" + c.id + ".m3u8", mime: "application/vnd.apple.mpegurl" };
+      else channel.ref = c.id;
+      return channel;
+    }),
+  };
+}
+
+export async function guide({ channelIds, from, to }) {
+  return api("/channels/guide?ids=" + encodeURIComponent(channelIds.join(",")) + "&from=" + from + "&to=" + to);
 }
 ```
 
 Try it under Node with `--config server=http://192.168.1.10:8096 --config user=ana --config
-password=…` (or `sdk/config.json`, kept out of git).
+password=…` (or `sdk/config.json`, kept out of git), from your computer's LAN address, not
+`127.0.0.1`: a loopback address is refused even as the person's own server. `node sdk/run.mjs .
+live categories` then shows the two categories and the playlist as Kino reads it ("3 canales en 1
+categorías; 0 entradas descartadas; 2 ocultas (adultos)").
 
 ### A Widevine-protected stream (apiVersion 2)
 
@@ -1311,7 +1620,8 @@ What Kino does with it, and what it does not:
   file fails the whole playback with the message below). `subtitles` and `headers` work as always.
 - When the license is refused, unreachable or expired, or the device has no Widevine (or no L3), the
   person reads "No se pudo abrir este video protegido" (after one more `resolve` if `expiresInSeconds`
-  had passed, like any stream). A protected title is **never downloadable** ("Este video no se puede
+  had passed, like any stream). A protected live channel reads the same at once on a device with no
+  L3; its other license failures are cuts, re-resolved like any other (see Live channels). A protected title is **never downloadable** ("Este video no se puede
   descargar"), even with `download` declared, and cannot be sent to a Chromecast (no plugin title can).
 - The consent sheet adds "Reproduce video protegido (DRM)" when `drm` is declared, and an update that
   newly declares it waits for the person's approval ([section 8](#8-publishing-your-plugin)).
@@ -1359,3 +1669,182 @@ What the flag does, and what it does not:
   that traffic can be read on the way; an update that newly marks an already-approved host
   `insecureHttp` waits for approval ([section 8](#8-publishing-your-plugin)). Prefer `https` whenever
   the server can: the flag is for the host that cannot.
+
+### Live channels: three recipes (apiVersion 3)
+
+Three ways to fill the En vivo tab, from the least code to the most control. Each is a complete
+plugin (see [Channels in the En vivo tab](#channels-in-the-en-vivo-tab-apiversion-3) and
+[Live channels](#live-channels-apiversion-3) for the rules).
+
+**1. A plain M3U list the person types.** The person pastes the address of their list (and, if they
+have one, of its guide) in Configurar; Kino downloads it, groups it and plays each entry itself.
+
+```json
+{
+  "id": "mi-lista", "name": "Mi lista", "version": "1.0.0", "apiVersion": 3, "entry": "plugin.js",
+  "hosts": [],
+  "capabilities": ["home", "resolve", "channels"],
+  "liveStreamHosts": "any",
+  "settings": [
+    { "key": "lista", "label": "Lista M3U", "type": "url", "required": true },
+    { "key": "guia", "label": "Guía XMLTV", "type": "url" }
+  ]
+}
+```
+
+`"hosts": []` is enough: the list and the guide are on servers the person typed. Their streams are
+not: an IPTV list points at dozens of servers nobody can declare ahead of time, which is what
+`"liveStreamHosts": "any"` is for ([Channels from any server](#channels-from-any-server-livestreamhosts-apiversion-3)).
+The person sees it on the consent sheet, in red: "Puede reproducir canales desde cualquier servidor
+que indique su lista". Leave it out when every stream is on hosts you can declare.
+
+```js
+// Kino downloads the list (and the guide), groups it and plays each entry by itself.
+export async function liveCategories() {
+  const guia = kino.config.get("guia");
+  return [{
+    playlist: {
+      url: kino.config.get("lista"),
+      format: "m3u",
+      epg: guia ? { url: guia, format: "xmltv" } : undefined,
+      hideGroups: ["Compras"],
+    },
+  }];
+}
+
+// Every channel comes from the list: no categories of your own to page.
+export async function liveChannels() {
+  return { items: [] };
+}
+
+// The manifest needs search or home; a plugin with only channels has an empty home.
+export async function home() {
+  return [];
+}
+
+// A direct list never calls resolve: its entries play as they are.
+export async function resolve() {
+  await null;
+  throw kino.error("not_found");
+}
+```
+
+```
+node sdk/run.mjs . --config lista=https://iptv-org.github.io/iptv/countries/co.m3u live categories
+```
+
+**2. A token per channel.** Your API lists the channels, and each play needs a freshly signed URL.
+`liveChannels` returns `{ id, title, ref }` items; `resolve(ref)` signs the URL when the person
+plays it. A channel's `expiresInSeconds` is ignored: when a live stream is cut, Kino simply calls
+`resolve` again.
+
+```json
+{
+  "id": "mi-tv", "name": "Mi TV", "version": "1.0.0", "apiVersion": 3, "entry": "plugin.js",
+  "hosts": ["api.example.com", "cdn.example.com"],
+  "capabilities": ["home", "resolve", "channels"],
+  "settings": [{ "key": "token", "label": "Código de acceso", "type": "password", "required": true }]
+}
+```
+
+```js
+const API = "https://api.example.com";
+
+async function api(path) {
+  const r = await kino.fetch(API + path, { headers: { Authorization: "Bearer " + kino.config.get("token") } });
+  if (r.status === 401) throw kino.error("auth_required", "código de acceso inválido");
+  if (!r.ok) throw kino.error("unavailable", "la API respondió " + r.status);
+  return r.json();
+}
+
+export async function home() {
+  return [];
+}
+
+export async function liveCategories() {
+  const cats = await api("/categorias"); // [{ slug, nombre }]
+  return cats.map((c) => ({ id: c.slug, title: c.nombre }));
+}
+
+// One page of a category. The ref is only the channel's id: the signed URL is made on play.
+export async function liveChannels({ categoryId, cursor }) {
+  const page = await api("/canales?categoria=" + encodeURIComponent(categoryId) + (cursor ? "&pagina=" + encodeURIComponent(cursor) : ""));
+  return {
+    items: page.canales.map((c) => ({ id: c.id, title: c.nombre, categoryId, ref: c.id, logo: c.logo, number: c.numero })),
+    next: page.siguiente || undefined,
+  };
+}
+
+// Called on every play, and again when the stream is cut: always a fresh token.
+export async function resolve(ref) {
+  const s = await api("/firmar/" + encodeURIComponent(ref)); // { url: "https://cdn.example.com/…?token=…" }
+  return { url: s.url, mime: "application/vnd.apple.mpegurl" };
+}
+```
+
+```
+node sdk/run.mjs . --config token=... live channels noticias
+```
+
+**3. Mixed.** Your own "Destacados" category with inline `stream` items (they play with no call to
+your plugin, so zapping through them is instant), plus the provider's full list declared with
+`resolve: true`: Kino downloads and groups it, and each of its entries plays through your
+`resolve(<entry url>)`, which appends a token.
+
+```json
+{
+  "id": "mi-mezcla", "name": "Mi mezcla", "version": "1.0.0", "apiVersion": 3, "entry": "plugin.js",
+  "hosts": ["api.example.com", "live.example.com", "listas.example.com"],
+  "capabilities": ["home", "resolve", "channels"]
+}
+```
+
+```js
+// Your own featured channels: inline streams, played with no call to the plugin (fast zapping).
+const DESTACADOS = [
+  { id: "noticias24", title: "Noticias 24", number: 1, url: "https://live.example.com/noticias24/index.m3u8" },
+  { id: "deportes", title: "Deportes", number: 2, url: "https://live.example.com/deportes/index.m3u8" },
+];
+
+export async function home() {
+  return [];
+}
+
+export async function liveCategories() {
+  return [
+    { id: "destacados", title: "Destacados" },
+    // The provider's full list: Kino downloads and groups it; each entry plays through resolve().
+    {
+      playlist: {
+        url: "https://listas.example.com/todos.m3u",
+        format: "m3u",
+        epg: { url: "https://listas.example.com/guia.xml.gz", format: "xmltv" },
+        resolve: true,
+      },
+    },
+  ];
+}
+
+export async function liveChannels({ categoryId }) {
+  if (categoryId !== "destacados") return { items: [] };
+  return {
+    items: DESTACADOS.map((c) => ({ id: c.id, title: c.title, number: c.number, categoryId, stream: { url: c.url } })),
+  };
+}
+
+// Only the list's entries get here (resolve: true), with the entry's URL as the ref.
+export async function resolve(url) {
+  const r = await kino.fetch("https://api.example.com/token");
+  if (!r.ok) throw kino.error("unavailable", "no hay token");
+  const { token } = r.json();
+  return { url: url + (url.includes("?") ? "&" : "?") + "token=" + encodeURIComponent(token) };
+}
+```
+
+The list's streams must be on your `hosts` here (`live.example.com`), since this manifest does not
+declare `"liveStreamHosts": "any"`; `live categories` counts the entries that are not as discarded.
+
+```
+node sdk/run.mjs . live categories
+node sdk/run.mjs . live channels destacados
+```
