@@ -59,6 +59,10 @@ node sdk/init.mjs ../my-plugin --host example.com
 
 Copy `plugin.js` and `kino-plugin.json`, change them, and publish your repository the same way.
 
+## License
+
+The code in this repository is licensed under the [Apache License 2.0](LICENSE). Copyright 2026 kinotvapp.
+
 ## License note
 
 What this plugin plays is not ours to license: the videos are public domain or carry the license
