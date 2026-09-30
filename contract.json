@@ -31,7 +31,9 @@
     "pathSegmentPattern": "^[A-Za-z0-9._-]+$",
     "maxPathChars": 200,
     "liveStreamHosts": { "value": "any", "apiVersion": 3, "requires": "channels" },
-    "discoverable": { "default": true }
+    "streamHosts": { "value": "any", "apiVersion": 4 },
+    "discoverable": { "default": true },
+    "secrets": { "apiVersion": 4, "namePattern": "^[A-Za-z][A-Za-z0-9_]{0,31}$", "maxSecrets": 16, "maxValueBytes": 4096, "prefix": "kino-sealed:v1:" }
   },
   "hostRules": {
     "labelPattern": "^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$",
@@ -131,6 +133,7 @@
     "browse": 20000,
     "episodes": 20000,
     "resolve": 20000,
+    "nuvioResolve": 45000,
     "liveCategories": 20000,
     "liveChannels": 20000,
     "guide": 20000

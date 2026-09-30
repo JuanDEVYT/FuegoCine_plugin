@@ -129,9 +129,29 @@ export function validateManifest(text, { knownPermissions = contract.permissions
     if (!caps.includes(lsh.requires)) return bad("liveStreamHosts", `"liveStreamHosts" necesita la capacidad "${lsh.requires}"`);
     liveStreamHostsAny = true;
   }
+  let streamHostsAny = false;
+  if (o.streamHosts !== undefined && o.apiVersion >= m.streamHosts.apiVersion) {
+    if (o.streamHosts !== m.streamHosts.value) return bad("streamHosts", `El campo "streamHosts" solo admite "${m.streamHosts.value}"`);
+    streamHostsAny = true;
+  }
   // Only discovery reads it (never the runtime): valid at every apiVersion, exactly true or false.
   if (o.discoverable !== undefined && typeof o.discoverable !== "boolean") return bad("discoverable", 'El campo "discoverable" debe ser true o false');
   const discoverable = o.discoverable === undefined ? m.discoverable.default : o.discoverable;
+  // Below its apiVersion the field is unknown and ignored like any other (v1/v2/v3 stay as they were).
+  let secrets = {};
+  if (o.secrets !== undefined && o.apiVersion >= m.secrets.apiVersion) {
+    if (o.secrets === null || typeof o.secrets !== "object" || Array.isArray(o.secrets)) return bad("secrets", 'El campo "secrets" debe ser un objeto');
+    const secretNames = Object.keys(o.secrets);
+    if (secretNames.length > m.secrets.maxSecrets) return bad("secrets", `El campo "secrets" admite hasta ${m.secrets.maxSecrets} secretos`);
+    const NAME = re(m.secrets.namePattern);
+    const parsed = {};
+    for (const name of secretNames) {
+      if (!NAME.test(name)) return bad("secrets", `El secreto "${name.slice(0, 40)}" tiene un nombre inválido`);
+      if (!isWellFormedSeal(o.secrets[name], m.secrets)) return bad("secrets", `El secreto "${name}" no es un sello de Kino válido`);
+      parsed[name] = o.secrets[name];
+    }
+    secrets = parsed;
+  }
   if (o.color !== undefined && o.color !== "" && !re(m.colorPattern).test(o.color)) return bad("color", 'El campo "color" debe ser del tipo #RRGGBB');
   if (o.icon !== undefined && o.icon !== "" && (!isSafeRelativePath(o.icon) || !o.icon.endsWith(".png"))) return bad("icon", 'El campo "icon" debe ser una ruta relativa a un .png');
   if (o.permissions !== undefined && !Array.isArray(o.permissions)) return bad("permissions", 'El campo "permissions" debe ser una lista');
@@ -145,7 +165,21 @@ export function validateManifest(text, { knownPermissions = contract.permissions
   if (hosts.length === 0 && !(o.settings || []).some((x) => x.type === "url" || (x.type === "list" && Array.isArray(x.fields) && x.fields.some((f) => f.type === "url")))) {
     return bad("hosts", 'El campo "hosts" solo puede estar vacío si el plugin tiene un ajuste de tipo "url"');
   }
-  return { ok: true, manifest: { ...o, hosts: [...new Set(hosts)], capabilities: caps, permissions: o.permissions || [], settings: o.settings || [], insecureHosts, liveStreamHostsAny, discoverable } };
+  return { ok: true, manifest: { ...o, hosts: [...new Set(hosts)], capabilities: caps, permissions: o.permissions || [], settings: o.settings || [], insecureHosts, liveStreamHostsAny, streamHostsAny, discoverable, secrets } };
+}
+
+/**
+ * Shape only, like the app's SealedSecrets.isWellFormed: the kit never opens a seal. The overhead
+ * (32-byte ephemeral pubkey + 12-byte nonce + 16-byte GCM tag = 60 bytes) plus 1..maxValueBytes of
+ * plaintext bounds the decoded length; SealedSecrets.kt is the source of truth for these numbers.
+ */
+function isWellFormedSeal(seal, s) {
+  if (typeof seal !== "string" || !seal.startsWith(s.prefix)) return false;
+  const body = seal.slice(s.prefix.length);
+  if (body.length === 0 || !/^[A-Za-z0-9_-]+$/.test(body)) return false;
+  const raw = Buffer.from(body, "base64url");
+  const overhead = 60;
+  return raw.length >= overhead + 1 && raw.length <= overhead + s.maxValueBytes;
 }
 
 function validateSettings(list, apiVersion = contract.maxApiVersion) {
@@ -326,7 +360,7 @@ function rows(value, ctx, drop) {
     let ref = typeof r.ref === "string" && r.ref ? r.ref : null;
     if (ref && !ctx.allowNext) { drop(`home: row ${id} has a ref but the plugin doesn't declare browse`); ref = null; }
     if (ref && ref.length > o().maxRefChars) { drop(`home: row ${id} ref too long`); ref = null; }
-    out.push({ id, title, ref, items: list });
+    out.push({ id, title, ref, items: list, genre: genreOf(r.genre) });
   });
   return out;
 }
@@ -381,6 +415,12 @@ function seasons(value, drop) {
 /** Up to `maxHeaders` request headers as the app keeps them: a token name, none of the forbidden ones, a string value with no line break. */
 const HEADER_NAME = /^[A-Za-z0-9-]{1,64}$/;
 const FORBIDDEN_HEADERS = ["host", "content-length", "transfer-encoding", "connection"];
+/** A declared `genre`, read as Genre.parse: the id when it is in the closed vocabulary (case and outer spaces ignored), else null. */
+function genreOf(raw) {
+  const g = typeof raw === "string" ? raw.trim().toLowerCase() : "";
+  return contract.genres.includes(g) ? g : null;
+}
+
 function headersOf(h) {
   const out = {};
   if (h === null || typeof h !== "object" || Array.isArray(h)) return out;
@@ -415,18 +455,24 @@ function stream(value, { manifest, servers, allowDrm, liveChannel = false }) {
   const check = urlChecker(manifest, servers);
   const drm = drmOf(value, check, allowDrm);
   // `liveStreamHosts: "any"` relaxes a live channel's own stream URL only; its subtitles, audio and
-  // license stay on the strict rule below.
-  if (liveChannel && manifest.liveStreamHostsAny) {
-    if (!liveStreamUrlAllowed(manifest, servers)(value.url)) throw new Error("El video apunta a una dirección local");
+  // license stay on the strict rule below. `streamHosts: "any"` on a movie or an episode is the app's
+  // broad-video rule (EffectiveHosts.anyPublicVideoHost, the player's own resolve): the URL AND its
+  // side subtitles and audio tracks; never the license. On a live channel it is the live rule.
+  const anyVideo = !liveChannel && manifest.streamHostsAny;
+  const anyPublic = liveStreamUrlAllowed(manifest, servers);
+  if ((liveChannel && manifest.liveStreamHostsAny) || manifest.streamHostsAny) {
+    if (!anyPublic(value.url)) throw new Error("El video apunta a una dirección local");
   } else check(value.url, "El video");
+  const sideOk = (url, what) => {
+    if (anyVideo) return anyPublic(url);
+    try { check(url, what); return true; } catch { return false; }
+  };
   const expires = Number.isInteger(value.expiresInSeconds) && value.expiresInSeconds >= o().minExpiresInSeconds && value.expiresInSeconds <= o().maxExpiresInSeconds ? value.expiresInSeconds : 0;
-  const subtitles = (Array.isArray(value.subtitles) ? value.subtitles : []).slice(0, o().maxSubtitles).filter((s) => {
-    try { check(s && s.url, "El subtítulo"); return true; } catch { return false; }
-  });
+  const subtitles = (Array.isArray(value.subtitles) ? value.subtitles : []).slice(0, o().maxSubtitles).filter((s) => sideOk(s && s.url, "El subtítulo"));
   // One URL is one merged child in the app: a repeated URL is kept once, the first wins.
   const audioUrls = new Set();
   const audioTracks = (Array.isArray(value.audioTracks) ? value.audioTracks : []).slice(0, o().maxAudioTracks).filter((a) => {
-    try { check(a && a.url, "El audio"); } catch { return false; }
+    if (!sideOk(a && a.url, "El audio")) return false;
     if (audioUrls.has(a.url)) return false;
     audioUrls.add(a.url);
     return true;
@@ -482,7 +528,7 @@ export function liveStreamUrlAllowed(manifest, servers = []) {
   const typedNames = servers.map((s) => { try { return new URL(s).hostname; } catch { return null; } });
   return (url) => {
     if (strict(url)) return true;
-    if (!manifest.liveStreamHostsAny) return false;
+    if (!manifest.liveStreamHostsAny && !manifest.streamHostsAny) return false;
     let u;
     try { u = new URL(String(url)); } catch { return false; }
     if (u.protocol !== "http:" && u.protocol !== "https:") return false;
@@ -507,7 +553,7 @@ function playlistOf(p, { manifest, servers }, drop) {
   const refreshHours = h >= live().minRefreshHours && h <= live().maxRefreshHours ? h : live().defaultRefreshHours;
   const hideGroups = [...new Set((Array.isArray(p.hideGroups) ? p.hideGroups : []).slice(0, live().maxHideGroups)
     .map((g) => (typeof g === "string" ? g.trim().toLowerCase().slice(0, 100) : "")).filter(Boolean))];
-  return { url, headers: headersOf(p.headers), epgUrl, refreshHours, hideGroups, resolve: p.resolve === true };
+  return { url, headers: headersOf(p.headers), epgUrl, refreshHours, hideGroups, resolve: p.resolve === true, streamHeaders: headersOf(p.streamHeaders), genre: genreOf(p.genre) };
 }
 
 /** liveCategories(), read as PluginOutput.liveCategories: `{ categories, playlists }`. */
@@ -539,7 +585,7 @@ function liveCategories(value, ctx, drop) {
     if (seen.has(id)) return drop(`liveCategories: duplicate ${id} dropped`);
     seen.add(id);
     const cc = typeof c.country === "string" ? c.country.trim().toUpperCase() : "";
-    categories.push({ id, title, country: /^[A-Z]{2}$/.test(cc) ? cc : "" });
+    categories.push({ id, title, country: /^[A-Z]{2}$/.test(cc) ? cc : "", genre: genreOf(c.genre) });
   });
   return { categories, playlists };
 }
