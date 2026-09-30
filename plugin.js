@@ -52,8 +52,7 @@ async function docs(query, rows, page = 1, sort) {
   return data.response.docs.filter((d) => VALID_ID.test(d.identifier));
 }
 
-// ---- The person's own addresses (Configurar: url1 ... url6) ---------------------------------------
-const SLOTS = 6;
+// ---- The person's own addresses (Configurar: the "sources" list) ---------------------------------------
 const NEWEST = "addeddate desc";
 
 // One address: a collection or item (archive.org/details/<id>) or a search (archive.org/search?query=...).
@@ -83,11 +82,12 @@ function parseSource(raw) {
 
 function sources() {
   const out = [];
-  for (let i = 1; i <= SLOTS; i++) {
-    const s = parseSource(kino.config.get("url" + i));
-    // `id` is the archive.org identifier; `key` is this address's slot; `category` is the optional row name the person gave it.
-    if (s) out.push({ ...s, key: "src" + i, category: String(kino.config.get("cat" + i) || "").trim().slice(0, 60) });
-  }
+  const entries = kino.config.get("sources");
+  (Array.isArray(entries) ? entries : []).forEach((e, i) => {
+    const s = parseSource(e.url);
+    // `id` is the archive.org identifier; `key` is this address's position; `category` is the optional row name the person gave it.
+    if (s) out.push({ ...s, key: "src" + (i + 1), category: String(e.category || "").trim().slice(0, 60) });
+  });
   return out;
 }
 

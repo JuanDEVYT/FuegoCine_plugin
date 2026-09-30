@@ -1,4 +1,4 @@
-// The person's own archive.org addresses (settings url1..url6): a Home row each, first in the results of a search,
+// The person's own archive.org addresses (the "sources" list setting): a Home row each, first in the results of a search,
 // and paged by "Ver más". Offline: every answer is made here, and the URLs the plugin asked for are recorded.
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -33,8 +33,14 @@ function archive({ answers = {}, titles = {}, files = {} } = {}) {
   return { fetchImpl, asked };
 }
 
+/** Test configs are written as slots (url1, cat2 ...) for readability; the plugin gets them as its list, in slot order, gaps closed. */
+function asList(config = {}) {
+  const slots = [...new Set(Object.keys(config).map((k) => /^(?:url|cat)(\d+)$/.exec(k)?.[1]).filter(Boolean))].sort((a, b) => a - b);
+  return slots.length ? { sources: slots.map((n) => ({ url: config["url" + n] ?? "", category: config["cat" + n] ?? "" })) } : {};
+}
+
 async function run(fn, args, config, fetchImpl) {
-  const r = await validate(root, { run: fn, args, config, fetchImpl });
+  const r = await validate(root, { run: fn, args, config: asList(config), fetchImpl });
   assert.deepEqual(r.problems, []);
   assert.deepEqual(r.drops, []);
   return r.output;
@@ -44,13 +50,15 @@ const BUILT_IN = ["films", "tv", "cartoons"];
 /** What the three built-in rows need, so a Home run has no empty row for the checker to drop. */
 const builtIns = { feature_films: [doc("f1", "Film")], classic_tv: [doc("t1", "TV")], animationandcartoons: [doc("c1", "Cartoon")] };
 
-test("the manifest declares six optional addresses, each with an optional category, and Kino accepts it", async () => {
+test("the manifest declares one list of addresses, each with an optional category, and Kino accepts it", async () => {
   const r = await validate(root);
   assert.deepEqual(r.problems, []);
-  const settings = JSON.parse(readFileSync(join(root, "kino-plugin.json"), "utf8")).settings;
-  assert.deepEqual(settings.map((x) => x.key), ["url1", "cat1", "url2", "cat2", "url3", "cat3", "url4", "cat4", "url5", "cat5", "url6", "cat6"]);
-  assert.ok(settings.filter((x) => x.key.startsWith("url")).every((x) => x.type === "url" && !x.required));
-  assert.ok(settings.filter((x) => x.key.startsWith("cat")).every((x) => x.type === "text" && !x.required));
+  const m = JSON.parse(readFileSync(join(root, "kino-plugin.json"), "utf8"));
+  assert.equal(m.apiVersion, 4);
+  assert.equal(m.settings.length, 1);
+  const list = m.settings[0];
+  assert.deepEqual([list.key, list.type, list.max], ["sources", "list", 30]);
+  assert.deepEqual(list.fields.map((f) => [f.key, f.type, !!f.required]), [["url", "url", true], ["category", "text", false]]);
 });
 
 test("without addresses the Home is what it always was", async () => {
@@ -85,7 +93,7 @@ test("an item address is a row with that one video when it is not a collection",
 test("a search address runs that search, movies only", async () => {
   const { fetchImpl, asked } = archive({ answers: { "subject:noir": [doc("n1", "Noir")], ...builtIns } });
   const rows = await run("home", [], { url2: "https://archive.org/search?query=subject%3Anoir" }, fetchImpl);
-  assert.equal(rows[0].id, "src2");
+  assert.equal(rows[0].id, "src1");
   assert.deepEqual(rows[0].items.map((i) => i.id), ["n1"]);
   const own = decodeURIComponent(asked.find((u) => u.includes("noir")));
   assert.ok(own.includes("(subject:noir) AND mediatype:(movies)"));
@@ -104,7 +112,7 @@ test("Ver más pages an own row, and an unknown row is not_found", async () => {
   const page = await run("browse", ["src1"], cfg, fetchImpl);
   assert.equal(page.items.length, 50);
   assert.equal(page.next, "2");
-  const r = await validate(root, { run: "browse", args: ["src5"], config: cfg, fetchImpl });
+  const r = await validate(root, { run: "browse", args: ["src5"], config: asList(cfg), fetchImpl });
   assert.ok(r.problems.some((p) => /not_found|ya no existe/.test(p)) || r.output == null);
 });
 
@@ -138,7 +146,7 @@ test("addresses with the same category (any capitals) share one Home row, in a s
 test("one address with a category is a row named after the category, not after the collection", async () => {
   const { fetchImpl } = archive({ answers: { "collection:(uno)": [doc("a", "A")], ...builtIns }, titles: { uno: "Título de la colección" } });
   const rows = await run("home", [], { url3: "https://archive.org/details/uno", cat3: "Para los niños" }, fetchImpl);
-  assert.equal(rows[0].id, "cat3");
+  assert.equal(rows[0].id, "cat1");
   assert.equal(rows[0].title, "Para los niños");
 });
 
