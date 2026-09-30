@@ -9,7 +9,7 @@ for plugin authors: one manifest, one JavaScript file, no build step.
 | Capability | How |
 | --- | --- |
 | `search` | Titles in both the `feature_films` (movies) and `classic_tv` (series) collections, most downloaded first, up to 25 from each; an item in both is listed once. The `type` Kino sends is only an ordering preference (the collection that matches it comes first), never a filter, because TMDB's movie/tv split does not line up with archive.org's: public-domain films and classic TV are mixed, and a title can exist as both. Characters and words that are query syntax to archive.org (`/`, `-`, `&`, `AND`, `OR`, `NOT`) are cleaned out of what the person typed. |
-| `home` | Three rows: public-domain films, classic TV and classic animation, by downloads, 30 titles each. Each row carries a `ref`, so Kino ends it with a "Ver más" card. |
+| `home` | Three rows: public-domain films, classic TV and classic animation, by downloads, 30 titles each, after the person's own rows if they set addresses (see below). Each row carries a `ref`, so Kino ends it with a "Ver más" card. |
 | `browse` | "Ver más" on a Home row: the same query as the row, 50 titles per page, the page number as the cursor (`"2"`, `"3"`, …). |
 | `episodes` | The video files of an item, in natural order. Files named `S01E02` get that season and number; otherwise they are numbered 1, 2, 3 in order. |
 | `resolve` | The file to play: the item's own mp4/m4v/webm, or the best mp4 archive.org derived from the original (`.avi`, `.mpg`, `.mkv`, `.divx`...). Sibling `.vtt`/`.srt` files become subtitles. |
@@ -18,6 +18,27 @@ Two things it does not try to be clever about, so do not copy them as intended b
 an item that bundles several films (a collection) is exposed as a single `movie`, and `resolve`
 plays its first video in natural name order; and episodes numbered `S01E00` (a pilot, a special)
 are dropped by Kino, whose episode numbers start at 1.
+
+## Your own addresses (Configurar)
+
+Under Ajustes > Plugins > Internet Archive > Configurar the person can add up to six archive.org
+addresses, each with an optional category name:
+
+| Address | What it lists |
+| --- | --- |
+| `https://archive.org/details/<collection>` | the videos of that collection |
+| `https://archive.org/details/<item>` | that one video (an item with no collection filed under it) |
+| `https://archive.org/search?query=...` | the videos a search returns (movies only) |
+
+Each address becomes a Home row of its own, before the three built-in ones, newest additions first
+(`addeddate desc`), with the same "Ver más" paging. Addresses that share a category name (capitals
+do not matter; the row keeps the first spelling) are merged into one row for that name, asked of
+archive.org as a single `OR` query. A category with no valid address behind it makes no row. What is
+inside the addresses is also searched, and comes first in Kino's search results. Anything that is not
+archive.org, or not one of the three forms above, is ignored: the plugin only ever talks to
+archive.org. With no addresses the plugin behaves exactly as before.
+
+The twelve settings (`url1`, `cat1` ... `url6`, `cat6`) are the most a manifest can declare.
 
 ## Hosts, and why `*.archive.org`
 

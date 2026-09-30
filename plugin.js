@@ -13,10 +13,10 @@ const FILMS = "collection:(feature_films) AND mediatype:(movies)";
 const TV = "collection:(classic_tv) AND mediatype:(movies)";
 const CARTOONS = "collection:(animationandcartoons) AND mediatype:(movies)";
 
-function advancedUrl(query, rows, page = 1) {
+function advancedUrl(query, rows, page = 1, sort = "downloads desc") {
   const parts = ["q=" + encodeURIComponent(query)];
   for (const f of FIELDS) parts.push("fl%5B%5D=" + f);
-  parts.push("sort%5B%5D=" + encodeURIComponent("downloads desc"), "rows=" + rows, "page=" + page, "output=json");
+  parts.push("sort%5B%5D=" + encodeURIComponent(sort), "rows=" + rows, "page=" + page, "output=json");
   return BASE + "/advancedsearch.php?" + parts.join("&");
 }
 
@@ -45,11 +45,103 @@ function toItem(doc, kind) {
   };
 }
 
-async function docs(query, rows, page = 1) {
-  const data = await getJson(advancedUrl(query, rows, page));
+async function docs(query, rows, page = 1, sort) {
+  const data = await getJson(advancedUrl(query, rows, page, sort));
   // A query archive.org can't parse still answers 200, with {"error": ...} instead of "response".
   if (!data.response) throw new Error("archive.org no entendió la búsqueda");
   return data.response.docs.filter((d) => VALID_ID.test(d.identifier));
+}
+
+// ---- The person's own addresses (Configurar: url1 ... url6) ---------------------------------------
+const SLOTS = 6;
+const NEWEST = "addeddate desc";
+
+// One address: a collection or item (archive.org/details/<id>) or a search (archive.org/search?query=...).
+// Anything else, or another site, is left out: the plugin only ever talks to archive.org.
+function parseSource(raw) {
+  const text = String(raw || "").trim();
+  if (!text) return null;
+  let u;
+  try {
+    u = new URL(text);
+  } catch {
+    return null;
+  }
+  if (u.protocol !== "https:" && u.protocol !== "http:") return null;
+  if (u.hostname !== "archive.org" && !u.hostname.endsWith(".archive.org")) return null;
+  const details = /^\/details\/([^/?#]+)/.exec(u.pathname);
+  if (details) {
+    const id = decodeURIComponent(details[1]);
+    return VALID_ID.test(id) ? { kind: "details", id } : null;
+  }
+  if (u.pathname === "/search") {
+    const q = (u.searchParams.get("query") || u.searchParams.get("q") || "").trim();
+    if (q) return { kind: "search", query: q };
+  }
+  return null;
+}
+
+function sources() {
+  const out = [];
+  for (let i = 1; i <= SLOTS; i++) {
+    const s = parseSource(kino.config.get("url" + i));
+    // `id` is the archive.org identifier; `key` is this address's slot; `category` is the optional row name the person gave it.
+    if (s) out.push({ ...s, key: "src" + i, category: String(kino.config.get("cat" + i) || "").trim().slice(0, 60) });
+  }
+  return out;
+}
+
+// What a details address lists: the videos of a collection, or, when nothing is filed under it, that one item.
+// Asked once per address for as long as the runtime lives.
+const scopes = new Map();
+async function scopeOf(source) {
+  if (source.kind === "search") return "(" + source.query + ") AND mediatype:(movies)";
+  if (!scopes.has(source.key)) {
+    const collection = "collection:(" + source.id + ") AND mediatype:(movies)";
+    const inside = await docs(collection, 1);
+    scopes.set(source.key, inside.length ? collection : "identifier:(" + source.id + ") AND mediatype:(movies)");
+  }
+  return scopes.get(source.key);
+}
+
+async function titleOf(source) {
+  if (source.kind === "search") return ("Búsqueda: " + source.query).slice(0, 80);
+  try {
+    const data = await getJson(BASE + "/metadata/" + encodeURIComponent(source.id) + "/metadata");
+    const title = first(data && data.result && data.result.title);
+    if (title) return String(title).slice(0, 80);
+  } catch (e) {
+    kino.log("title failed", source.id, e.message);
+  }
+  return source.id;
+}
+
+// The Home rows the addresses make: an address with a category joins the row of that category (same name, any capitals; the
+// row keeps the first spelling and is keyed by the first address's slot); an address without one is a row of its own.
+function ownRows() {
+  const out = [];
+  const byCategory = new Map();
+  for (const s of sources()) {
+    if (!s.category) {
+      out.push({ key: s.key, title: null, sources: [s] });
+      continue;
+    }
+    const name = s.category.toLowerCase();
+    if (!byCategory.has(name)) {
+      const row = { key: "cat" + s.key.slice(3), title: s.category, sources: [] };
+      byCategory.set(name, row);
+      out.push(row);
+    }
+    byCategory.get(name).sources.push(s);
+  }
+  return out;
+}
+
+// One archive.org query for a whole row (or for every address, in a search): its addresses' scopes, joined.
+async function queryOf(sourceList) {
+  const scopesOf = [];
+  for (const s of sourceList) scopesOf.push(await scopeOf(s));
+  return scopesOf.length === 1 ? scopesOf[0] : scopesOf.map((x) => "(" + x + ")").join(" OR ");
 }
 
 export async function search(query) {
@@ -77,6 +169,19 @@ export async function search(query) {
   if (query.type === "series") groups.reverse();
   const out = [];
   const seen = new Set();
+  // What is inside the person's own addresses comes first.
+  const mine = sources();
+  if (mine.length) {
+    try {
+      for (const d of await docs(title + " AND (" + (await queryOf(mine)) + ")", 25)) {
+        if (seen.has(d.identifier)) continue;
+        seen.add(d.identifier);
+        out.push(toItem(d, "movie"));
+      }
+    } catch (e) {
+      kino.log("search in the person's addresses failed", e.message);
+    }
+  }
   for (const group of groups) {
     for (const d of await docs(title + " AND " + group.where, 25)) {
       // An item can be in both collections: it is listed once, as the kind of the group that came first.
@@ -99,6 +204,15 @@ const PAGE_SIZE = 50;
 
 export async function home() {
   const out = [];
+  // The person's own addresses, newest first, before the plugin's own rows.
+  for (const row of ownRows()) {
+    try {
+      const found = await docs(await queryOf(row.sources), ROW_SIZE, 1, NEWEST);
+      if (found.length) out.push({ id: row.key, title: row.title || (await titleOf(row.sources[0])), ref: row.key, items: found.map((d) => toItem(d, "movie")) });
+    } catch (e) {
+      kino.log("home row failed", row.key, e.message);
+    }
+  }
   for (const row of ROWS) {
     try {
       const found = await docs(row.query, ROW_SIZE);
@@ -113,12 +227,13 @@ export async function home() {
 // "Ver más" on a Home row: the same query, a page at a time. The cursor is the next page number.
 export async function browse(ref, cursor) {
   await null; // the checks below may throw: never before the first await
-  const row = ROWS.find((r) => r.id === ref);
+  const own = ownRows().find((r) => r.key === ref);
+  const row = own || ROWS.find((r) => r.id === ref);
   if (!row) throw kino.error("not_found", "esa fila ya no existe");
   const page = cursor ? Number(cursor) : 1;
   if (!Number.isInteger(page) || page < 1 || page > 100) throw kino.error("not_found", "página inválida");
-  const found = await docs(row.query, PAGE_SIZE, page);
-  return { items: found.map((d) => toItem(d, row.kind)), next: found.length === PAGE_SIZE ? String(page + 1) : undefined };
+  const found = own ? await docs(await queryOf(own.sources), PAGE_SIZE, page, NEWEST) : await docs(row.query, PAGE_SIZE, page);
+  return { items: found.map((d) => toItem(d, own ? "movie" : row.kind)), next: found.length === PAGE_SIZE ? String(page + 1) : undefined };
 }
 
 async function metadata(id) {

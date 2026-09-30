@@ -1,0 +1,175 @@
+// The person's own archive.org addresses (settings url1..url6): a Home row each, first in the results of a search,
+// and paged by "Ver más". Offline: every answer is made here, and the URLs the plugin asked for are recorded.
+import { test } from "node:test";
+import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
+import { validate } from "../sdk/validate.mjs";
+
+const root = join(dirname(fileURLToPath(import.meta.url)), "..");
+
+const doc = (id, title) => ({ identifier: id, title, year: "1950", description: "d" });
+
+/** An archive.org that knows: what each advancedsearch `q` answers, and the metadata titles. */
+function archive({ answers = {}, titles = {} } = {}) {
+  const asked = [];
+  const fetchImpl = async (url) => {
+    asked.push(String(url));
+    const u = new URL(url);
+    if (u.pathname === "/advancedsearch.php") {
+      const q = u.searchParams.get("q");
+      // An OR of several scopes answers with the union of what each one holds, like archive.org.
+      const docs = [];
+      for (const [needle, list] of Object.entries(answers)) if (q.includes(needle)) for (const d of list) if (!docs.some((x) => x.identifier === d.identifier)) docs.push(d);
+      return new Response(JSON.stringify({ response: { docs } }), { status: 200, headers: { "content-type": "application/json" } });
+    }
+    const m = /^\/metadata\/([^/]+)\/metadata$/.exec(u.pathname);
+    if (m && titles[m[1]]) return new Response(JSON.stringify({ result: { title: titles[m[1]] } }), { status: 200, headers: { "content-type": "application/json" } });
+    return new Response("{}", { status: 404 });
+  };
+  return { fetchImpl, asked };
+}
+
+async function run(fn, args, config, fetchImpl) {
+  const r = await validate(root, { run: fn, args, config, fetchImpl });
+  assert.deepEqual(r.problems, []);
+  assert.deepEqual(r.drops, []);
+  return r.output;
+}
+
+const BUILT_IN = ["films", "tv", "cartoons"];
+/** What the three built-in rows need, so a Home run has no empty row for the checker to drop. */
+const builtIns = { feature_films: [doc("f1", "Film")], classic_tv: [doc("t1", "TV")], animationandcartoons: [doc("c1", "Cartoon")] };
+
+test("the manifest declares six optional addresses, each with an optional category, and Kino accepts it", async () => {
+  const r = await validate(root);
+  assert.deepEqual(r.problems, []);
+  const settings = JSON.parse(readFileSync(join(root, "kino-plugin.json"), "utf8")).settings;
+  assert.deepEqual(settings.map((x) => x.key), ["url1", "cat1", "url2", "cat2", "url3", "cat3", "url4", "cat4", "url5", "cat5", "url6", "cat6"]);
+  assert.ok(settings.filter((x) => x.key.startsWith("url")).every((x) => x.type === "url" && !x.required));
+  assert.ok(settings.filter((x) => x.key.startsWith("cat")).every((x) => x.type === "text" && !x.required));
+});
+
+test("without addresses the Home is what it always was", async () => {
+  const { fetchImpl } = archive({ answers: builtIns });
+  const rows = await run("home", [], {}, fetchImpl);
+  assert.deepEqual(rows.map((r) => r.id), BUILT_IN);
+});
+
+test("a collection address becomes the first Home row, newest additions first, titled after the collection", async () => {
+  const { fetchImpl, asked } = archive({
+    answers: { "collection:(mis-pelis)": [doc("a", "Nueva"), doc("b", "Vieja")], ...builtIns },
+    titles: { "mis-pelis": "Mis películas" },
+  });
+  const rows = await run("home", [], { url1: "https://archive.org/details/mis-pelis" }, fetchImpl);
+  assert.deepEqual(rows.map((r) => r.id), ["src1", ...BUILT_IN]);
+  assert.equal(rows[0].title, "Mis películas");
+  assert.equal(rows[0].ref, "src1");
+  assert.deepEqual(rows[0].items.map((i) => i.id), ["a", "b"]);
+  assert.ok(rows[0].items.every((i) => i.kind === "movie"));
+  const own = asked.find((u) => u.includes("mis-pelis") && u.includes("advancedsearch") && u.includes("rows=30"));
+  assert.ok(decodeURIComponent(own).includes("collection:(mis-pelis) AND mediatype:(movies)"));
+  assert.ok(decodeURIComponent(own).includes("sort[]=addeddate desc"), "the newest first");
+});
+
+test("an item address is a row with that one video when it is not a collection", async () => {
+  const { fetchImpl } = archive({ answers: { "identifier:(un-video)": [doc("un-video", "Un video")], ...builtIns }, titles: { "un-video": "Un video" } });
+  const rows = await run("home", [], { url1: "https://archive.org/details/un-video" }, fetchImpl);
+  assert.equal(rows[0].id, "src1");
+  assert.deepEqual(rows[0].items.map((i) => i.id), ["un-video"]);
+});
+
+test("a search address runs that search, movies only", async () => {
+  const { fetchImpl, asked } = archive({ answers: { "subject:noir": [doc("n1", "Noir")], ...builtIns } });
+  const rows = await run("home", [], { url2: "https://archive.org/search?query=subject%3Anoir" }, fetchImpl);
+  assert.equal(rows[0].id, "src2");
+  assert.deepEqual(rows[0].items.map((i) => i.id), ["n1"]);
+  const own = decodeURIComponent(asked.find((u) => u.includes("noir")));
+  assert.ok(own.includes("(subject:noir) AND mediatype:(movies)"));
+});
+
+test("an address that is not archive.org, or is garbage, is left out without breaking the Home", async () => {
+  const { fetchImpl } = archive({ answers: builtIns });
+  const rows = await run("home", [], { url1: "https://example.com/details/x", url2: "no es una url", url3: "https://archive.org/about" }, fetchImpl);
+  assert.deepEqual(rows.map((r) => r.id), BUILT_IN);
+});
+
+test("Ver más pages an own row, and an unknown row is not_found", async () => {
+  const many = Array.from({ length: 50 }, (_, i) => doc("x" + i, "X" + i));
+  const { fetchImpl } = archive({ answers: { "collection:(mis-pelis)": many } });
+  const cfg = { url1: "https://archive.org/details/mis-pelis" };
+  const page = await run("browse", ["src1"], cfg, fetchImpl);
+  assert.equal(page.items.length, 50);
+  assert.equal(page.next, "2");
+  const r = await validate(root, { run: "browse", args: ["src5"], config: cfg, fetchImpl });
+  assert.ok(r.problems.some((p) => /not_found|ya no existe/.test(p)) || r.output == null);
+});
+
+test("a search puts what is inside the person's addresses first, once", async () => {
+  const { fetchImpl } = archive({
+    answers: {
+      "collection:(mis-pelis)": [doc("mine", "Casablanca copia")],
+      // The same video is also in the global results, after another one: the own one still leads, and is listed once.
+      feature_films: [doc("f2", "Casablanca"), doc("mine", "Casablanca copia")],
+    },
+  });
+  const out = await run("search", ["casablanca"], { url1: "https://archive.org/details/mis-pelis" }, fetchImpl);
+  assert.deepEqual(out.items.map((i) => i.id), ["mine", "f2"]);
+});
+
+test("addresses with the same category (any capitals) share one Home row, in a single query, named as typed first", async () => {
+  const { fetchImpl, asked } = archive({
+    answers: { "collection:(uno)": [doc("a", "A")], "collection:(dos)": [doc("b", "B")], ...builtIns },
+    titles: { uno: "Uno", dos: "Dos" },
+  });
+  const cfg = { url1: "https://archive.org/details/uno", cat1: "Mis clásicos", url2: "https://archive.org/details/dos", cat2: "mis CLÁSICOS" };
+  const rows = await run("home", [], cfg, fetchImpl);
+  assert.deepEqual(rows.map((r) => r.id), ["cat1", ...BUILT_IN]);
+  assert.equal(rows[0].title, "Mis clásicos");
+  assert.equal(rows[0].ref, "cat1");
+  assert.deepEqual(rows[0].items.map((i) => i.id).sort(), ["a", "b"]);
+  const combined = asked.map(decodeURIComponent).find((u) => u.includes("rows=30") && u.includes("collection:(uno)") && u.includes("collection:(dos)"));
+  assert.ok(combined && combined.includes(" OR "), "one query for the whole category");
+});
+
+test("one address with a category is a row named after the category, not after the collection", async () => {
+  const { fetchImpl } = archive({ answers: { "collection:(uno)": [doc("a", "A")], ...builtIns }, titles: { uno: "Título de la colección" } });
+  const rows = await run("home", [], { url3: "https://archive.org/details/uno", cat3: "Para los niños" }, fetchImpl);
+  assert.equal(rows[0].id, "cat3");
+  assert.equal(rows[0].title, "Para los niños");
+});
+
+test("addresses without a category keep a row each, next to a categorised one", async () => {
+  const { fetchImpl } = archive({ answers: { "collection:(uno)": [doc("a", "A")], "collection:(dos)": [doc("b", "B")], "collection:(tres)": [doc("c", "C")], ...builtIns }, titles: { uno: "Uno", dos: "Dos", tres: "Tres" } });
+  const cfg = { url1: "https://archive.org/details/uno", url2: "https://archive.org/details/dos", cat2: "Solo dos", url3: "https://archive.org/details/tres" };
+  const rows = await run("home", [], cfg, fetchImpl);
+  assert.deepEqual(rows.map((r) => r.id), ["src1", "cat2", "src3", ...BUILT_IN]);
+  assert.deepEqual(rows.slice(0, 3).map((r) => r.title), ["Uno", "Solo dos", "Tres"]);
+});
+
+test("a category with no address behind it makes no row", async () => {
+  const { fetchImpl } = archive({ answers: builtIns });
+  const rows = await run("home", [], { cat1: "Nada", url2: "no es una url", cat2: "Tampoco" }, fetchImpl);
+  assert.deepEqual(rows.map((r) => r.id), BUILT_IN);
+});
+
+test("Ver más on a category pages the whole category's query", async () => {
+  const many = Array.from({ length: 50 }, (_, i) => doc("x" + i, "X" + i));
+  const { fetchImpl, asked } = archive({ answers: { "collection:(uno)": many, "collection:(dos)": many } });
+  const cfg = { url1: "https://archive.org/details/uno", cat1: "Mix", url2: "https://archive.org/details/dos", cat2: "Mix" };
+  const page = await run("browse", ["cat1"], cfg, fetchImpl);
+  assert.equal(page.items.length, 50);
+  assert.equal(page.next, "2");
+  const q = asked.map(decodeURIComponent).find((u) => u.includes("rows=50"));
+  assert.ok(q.includes("collection:(uno)") && q.includes("collection:(dos)") && q.includes(" OR "));
+});
+
+test("a search looks inside every address at once, whatever their categories", async () => {
+  const { fetchImpl, asked } = archive({ answers: { "collection:(uno)": [doc("a", "Cine A")], "collection:(dos)": [doc("b", "Cine B")] } });
+  const cfg = { url1: "https://archive.org/details/uno", cat1: "X", url2: "https://archive.org/details/dos" };
+  const out = await run("search", ["cine"], cfg, fetchImpl);
+  assert.ok(out.items.some((i) => i.id === "a") || out.items.some((i) => i.id === "b"));
+  const own = asked.map(decodeURIComponent).find((u) => u.includes("title:(cine)") && u.includes("collection:(uno)") && u.includes("collection:(dos)"));
+  assert.ok(own, "one search over both scopes");
+});
