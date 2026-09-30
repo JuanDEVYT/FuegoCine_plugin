@@ -94,14 +94,54 @@ function sources() {
 // What a details address lists: the videos of a collection, or, when nothing is filed under it, that one item.
 // Asked once per address for as long as the runtime lives.
 const scopes = new Map();
-async function scopeOf(source) {
-  if (source.kind === "search") return "(" + source.query + ") AND mediatype:(movies)";
+async function scopeInfo(source) {
+  if (source.kind === "search") return { query: "(" + source.query + ") AND mediatype:(movies)", item: false };
   if (!scopes.has(source.key)) {
     const collection = "collection:(" + source.id + ") AND mediatype:(movies)";
     const inside = await docs(collection, 1);
-    scopes.set(source.key, inside.length ? collection : "identifier:(" + source.id + ") AND mediatype:(movies)");
+    scopes.set(source.key, inside.length ? { query: collection, item: false } : { query: "identifier:(" + source.id + ") AND mediatype:(movies)", item: true });
   }
   return scopes.get(source.key);
+}
+
+async function scopeOf(source) {
+  return (await scopeInfo(source)).query;
+}
+
+// An item address with several videos shows one card per video (a single video stays the item's one card). The card's id is
+// `<identifier>~<n>` (an id cannot hold `|`); its ref is `<identifier>|<file>`, which `resolve` already plays.
+const MAX_VIDEO_CARDS = 100;
+async function videoCards(identifier, doc) {
+  const meta = await metadata(identifier);
+  const originals = videoOriginals(meta.files);
+  if (originals.length < 2) return [];
+  const base = toItem(doc || { identifier, title: first(meta.metadata && meta.metadata.title) }, "movie");
+  return originals.slice(0, MAX_VIDEO_CARDS).map((f, i) => ({
+    ...base,
+    id: identifier + "~" + (i + 1),
+    ref: identifier + "|" + f.name,
+    title: (base.title + " · " + episodeTitle(f)).slice(0, 200),
+  }));
+}
+
+// The cards of a list of archive.org docs: the ones that are an item address with several videos are expanded.
+async function cardsOf(found, sourceList) {
+  const itemIds = new Set();
+  for (const s of sourceList) if (s.kind === "details" && (await scopeInfo(s)).item) itemIds.add(s.id);
+  const out = [];
+  for (const d of found) {
+    let parts = [];
+    if (itemIds.has(d.identifier)) {
+      try {
+        parts = await videoCards(d.identifier, d);
+      } catch (e) {
+        kino.log("videos of", d.identifier, "failed", e.message);
+      }
+    }
+    if (parts.length) out.push(...parts);
+    else out.push(toItem(d, "movie"));
+  }
+  return out;
 }
 
 async function titleOf(source) {
@@ -173,10 +213,21 @@ export async function search(query) {
   const mine = sources();
   if (mine.length) {
     try {
-      for (const d of await docs(title + " AND (" + (await queryOf(mine)) + ")", 25)) {
-        if (seen.has(d.identifier)) continue;
-        seen.add(d.identifier);
-        out.push(toItem(d, "movie"));
+      const hits = (await docs(title + " AND (" + (await queryOf(mine)) + ")", 25)).filter((d) => !seen.has(d.identifier));
+      for (const card of await cardsOf(hits, mine)) {
+        if (seen.has(card.id)) continue;
+        seen.add(card.id);
+        out.push(card);
+      }
+      // An item address with several videos is also searched by its videos' own titles.
+      const words = text.toLowerCase().split(" ");
+      for (const s of mine) {
+        if (s.kind !== "details" || !(await scopeInfo(s)).item) continue;
+        for (const card of await videoCards(s.id)) {
+          if (seen.has(card.id) || !words.every((w) => card.title.toLowerCase().includes(w))) continue;
+          seen.add(card.id);
+          out.push(card);
+        }
       }
     } catch (e) {
       kino.log("search in the person's addresses failed", e.message);
@@ -208,7 +259,7 @@ export async function home() {
   for (const row of ownRows()) {
     try {
       const found = await docs(await queryOf(row.sources), ROW_SIZE, 1, NEWEST);
-      if (found.length) out.push({ id: row.key, title: row.title || (await titleOf(row.sources[0])), ref: row.key, items: found.map((d) => toItem(d, "movie")) });
+      if (found.length) out.push({ id: row.key, title: row.title || (await titleOf(row.sources[0])), ref: row.key, items: await cardsOf(found, row.sources) });
     } catch (e) {
       kino.log("home row failed", row.key, e.message);
     }
@@ -233,7 +284,7 @@ export async function browse(ref, cursor) {
   const page = cursor ? Number(cursor) : 1;
   if (!Number.isInteger(page) || page < 1 || page > 100) throw kino.error("not_found", "página inválida");
   const found = own ? await docs(await queryOf(own.sources), PAGE_SIZE, page, NEWEST) : await docs(row.query, PAGE_SIZE, page);
-  return { items: found.map((d) => toItem(d, own ? "movie" : row.kind)), next: found.length === PAGE_SIZE ? String(page + 1) : undefined };
+  return { items: own ? await cardsOf(found, own.sources) : found.map((d) => toItem(d, row.kind)), next: found.length === PAGE_SIZE ? String(page + 1) : undefined };
 }
 
 async function metadata(id) {

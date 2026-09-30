@@ -12,7 +12,7 @@ const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const doc = (id, title) => ({ identifier: id, title, year: "1950", description: "d" });
 
 /** An archive.org that knows: what each advancedsearch `q` answers, and the metadata titles. */
-function archive({ answers = {}, titles = {} } = {}) {
+function archive({ answers = {}, titles = {}, files = {} } = {}) {
   const asked = [];
   const fetchImpl = async (url) => {
     asked.push(String(url));
@@ -24,6 +24,8 @@ function archive({ answers = {}, titles = {} } = {}) {
       for (const [needle, list] of Object.entries(answers)) if (q.includes(needle)) for (const d of list) if (!docs.some((x) => x.identifier === d.identifier)) docs.push(d);
       return new Response(JSON.stringify({ response: { docs } }), { status: 200, headers: { "content-type": "application/json" } });
     }
+    const whole = /^\/metadata\/([^/]+)$/.exec(u.pathname);
+    if (whole && files[whole[1]]) return new Response(JSON.stringify({ metadata: { title: titles[whole[1]] || whole[1] }, files: files[whole[1]] }), { status: 200, headers: { "content-type": "application/json" } });
     const m = /^\/metadata\/([^/]+)\/metadata$/.exec(u.pathname);
     if (m && titles[m[1]]) return new Response(JSON.stringify({ result: { title: titles[m[1]] } }), { status: 200, headers: { "content-type": "application/json" } });
     return new Response("{}", { status: 404 });
@@ -172,4 +174,50 @@ test("a search looks inside every address at once, whatever their categories", a
   assert.ok(out.items.some((i) => i.id === "a") || out.items.some((i) => i.id === "b"));
   const own = asked.map(decodeURIComponent).find((u) => u.includes("title:(cine)") && u.includes("collection:(uno)") && u.includes("collection:(dos)"));
   assert.ok(own, "one search over both scopes");
+});
+
+const mp4 = (name, extra = {}) => ({ name, source: "original", format: "h.264", length: "60", ...extra });
+
+test("an item address with several videos is one card per video, playable one by one", async () => {
+  const { fetchImpl } = archive({
+    answers: { "identifier:(serie)": [doc("serie", "Mi serie")], ...builtIns },
+    titles: { serie: "Mi serie" },
+    files: { serie: [mp4("S01E01 - Uno.mp4"), mp4("S01E02 - Dos.mp4"), mp4("S01E03 - Tres.mp4")] },
+  });
+  const rows = await run("home", [], { url1: "https://archive.org/details/serie" }, fetchImpl);
+  assert.equal(rows[0].id, "src1");
+  assert.deepEqual(rows[0].items.map((i) => i.id), ["serie~1", "serie~2", "serie~3"]);
+  assert.deepEqual(rows[0].items.map((i) => i.ref), ["serie|S01E01 - Uno.mp4", "serie|S01E02 - Dos.mp4", "serie|S01E03 - Tres.mp4"]);
+  assert.ok(rows[0].items.every((i) => i.kind === "movie" && i.title.startsWith("Mi serie")));
+  assert.deepEqual(rows[0].items.map((i) => i.title.split(" · ")[1]), ["Uno", "Dos", "Tres"]);
+});
+
+test("an item with a single video stays one card with the plain identifier", async () => {
+  const { fetchImpl } = archive({
+    answers: { "identifier:(solo)": [doc("solo", "Solo uno")], ...builtIns },
+    files: { solo: [mp4("solo.mp4")] },
+  });
+  const rows = await run("home", [], { url1: "https://archive.org/details/solo" }, fetchImpl);
+  assert.deepEqual(rows[0].items.map((i) => [i.id, i.ref]), [["solo", "solo"]]);
+});
+
+test("a category can hold a collection and a multi-video item together", async () => {
+  const { fetchImpl } = archive({
+    answers: { "collection:(col)": [doc("c1", "De la colección")], "identifier:(serie)": [doc("serie", "Mi serie")], ...builtIns },
+    files: { serie: [mp4("a.mp4"), mp4("b.mp4")] },
+  });
+  const cfg = { url1: "https://archive.org/details/col", cat1: "Mezcla", url2: "https://archive.org/details/serie", cat2: "Mezcla" };
+  const rows = await run("home", [], cfg, fetchImpl);
+  assert.equal(rows[0].id, "cat1");
+  assert.deepEqual(rows[0].items.map((i) => i.id).sort(), ["c1", "serie~1", "serie~2"]);
+});
+
+test("a search finds a video by its own title inside a multi-video item address", async () => {
+  // archive.org's own title search does not match the item ("Mi serie"), so the plugin has to look inside it.
+  const { fetchImpl } = archive({
+    answers: {},
+    files: { serie: [mp4("Capitulo uno.mp4"), mp4("El gran final.mp4")] },
+  });
+  const out = await run("search", ["gran final"], { url1: "https://archive.org/details/serie" }, fetchImpl);
+  assert.deepEqual(out.items.map((i) => i.ref), ["serie|El gran final.mp4"]);
 });

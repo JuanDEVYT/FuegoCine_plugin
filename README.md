@@ -15,8 +15,9 @@ for plugin authors: one manifest, one JavaScript file, no build step.
 | `resolve` | The file to play: the item's own mp4/m4v/webm, or the best mp4 archive.org derived from the original (`.avi`, `.mpg`, `.mkv`, `.divx`...). Sibling `.vtt`/`.srt` files become subtitles. |
 
 Two things it does not try to be clever about, so do not copy them as intended behavior:
-an item that bundles several films (a collection) is exposed as a single `movie`, and `resolve`
-plays its first video in natural name order; and episodes numbered `S01E00` (a pilot, a special)
+an item found inside a collection or in the built-in rows that bundles several films is exposed as
+a single `movie`, and `resolve` plays its first video in natural name order (put its own address in
+Configurar to get one card per video); and episodes numbered `S01E00` (a pilot, a special)
 are dropped by Kino, whose episode numbers start at 1.
 
 ## Your own addresses (Configurar)
@@ -27,7 +28,7 @@ addresses, each with an optional category name:
 | Address | What it lists |
 | --- | --- |
 | `https://archive.org/details/<collection>` | the videos of that collection |
-| `https://archive.org/details/<item>` | that one video (an item with no collection filed under it) |
+| `https://archive.org/details/<item>` | that item (one with no collection filed under it): a single video is one card; an item with several videos is one card per video (`<item>~1`, `<item>~2`, ...), each playing its own file, and a search also looks at their titles |
 | `https://archive.org/search?query=...` | the videos a search returns (movies only) |
 
 Each address becomes a Home row of its own, before the three built-in ones, newest additions first
