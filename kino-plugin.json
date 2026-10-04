@@ -1,7 +1,7 @@
 {
   "id": "fuegocine",
   "name": "FuegoCine",
-  "version": "1.0.3",
+  "version": "1.0.5",
   "apiVersion": 5,
   "entry": "plugin.js",
   "description": "Películas y series en español de fuegocine.com: búsqueda, secciones, episodios y descargas.",
@@ -13,7 +13,39 @@
     "videro.my",
     "avcaption.com",
     "playmate.to",
-    "frv2.plauymito.live"
+    "frv2.plauymito.live",
+    "vimeos.unlimplay.com",
+    "p1.vimeos.zip",
+    "p2.vimeos.zip",
+    "p3.vimeos.zip",
+    "p4.vimeos.zip",
+    "p5.vimeos.zip",
+    "p6.vimeos.zip",
+    "p7.vimeos.zip",
+    "p8.vimeos.zip",
+    "p9.vimeos.zip",
+    "p10.vimeos.zip",
+    "s1.vimeos.net",
+    "s2.vimeos.net",
+    "s3.vimeos.net",
+    "s4.vimeos.net",
+    "s5.vimeos.net",
+    "s6.vimeos.net",
+    "s7.vimeos.net",
+    "s8.vimeos.net",
+    "s9.vimeos.net",
+    "s10.vimeos.net",
+    "s11.vimeos.net",
+    "s12.vimeos.net",
+    "s13.vimeos.net",
+    "s14.vimeos.net",
+    "s15.vimeos.net",
+    "s16.vimeos.net",
+    "s17.vimeos.net",
+    "s18.vimeos.net",
+    "s19.vimeos.net",
+    "s20.vimeos.net",
+    "drive.usercontent.google.com"
   ],
   "streamHosts": "any",
   "capabilities": [
@@ -28,6 +60,6 @@
   "icon": "icon.png",
   "signature": {
     "authorKey": "5c73e82ad7d25cddd1572ad6745462c6faa3c17225172c60bf233c744ca34240",
-    "value": "5900e75216dfb8d6a0c0d24f80e0dba2b6f33ddf16e15d7f90b63b376633389bed1e221a14548c2ef4568563f80dfadd828c21d1b0565363a0184dd8ae1e6207"
+    "value": "5745c2d053af28c2c889c9af6069c0947fd671b8ad0e9e7c82acb691e9fa35625f026a7dc4daa8b27397c0657dcb289a7d14a58861b51ff486a11c577ce00004"
   }
 }

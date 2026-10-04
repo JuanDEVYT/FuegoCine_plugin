@@ -12,6 +12,7 @@ const REPO = "JuanDEVYT/FuegoCine_plugin";
 const json = (v) => new Response(JSON.stringify(v), { status: 200, headers: { "content-type": "application/json" } });
 const html = (s) => new Response(s, { status: 200, headers: { "content-type": "text/html; charset=utf-8" } });
 const text = (s) => new Response(s, { status: 200, headers: { "content-type": "application/vnd.apple.mpegurl" } });
+const MEDIA = "#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:6\n#EXTINF:6.0,\nseg0.ts\n#EXT-X-ENDLIST\n";
 
 function post(id, title, terms, content) {
   return {
@@ -63,17 +64,18 @@ const episode2 = post("1000000000000000002", "Gran Serie 1x2", ["Episode", "id-9
 
 const movie = post("5000000000000000001", "Cine Prueba (2024)", ["Movie", "2024", "Acción", "Estreno"], movieContent);
 
-function source(posts) {
+function source(posts, opts = {}) {
   const asked = [];
-  const fetchImpl = async (url, opts = {}) => {
+  const fetchImpl = async (url, opts2 = {}) => {
     const u = new URL(String(url));
     asked.push(String(url));
     const path = decodeURIComponent(u.pathname);
-    const method = String(opts.method || "GET").toUpperCase();
+    const method = String(opts2.method || "GET").toUpperCase();
 
     if (u.hostname === "videro.my") {
       const m = /^\/api\/videos\/public\/([A-Za-z0-9]+)$/.exec(path);
       if (m) return json({ title: "t", share_id: m[1], hls_url: "/hls/aaa/index.m3u8", tracks: [] });
+      if (/^\/hls\/[A-Za-z0-9]+\/index\.m3u8$/.test(path)) return text(MEDIA);
       return new Response("no", { status: 404 });
     }
     if (u.hostname === "avcaption.com") {
@@ -90,11 +92,15 @@ function source(posts) {
             "/api/stream/" + m[1] + "/playlist?token=tok&v=1080p\n",
         });
       }
+      if (/^\/api\/stream\/[A-Za-z0-9]+\/playlist$/.test(path)) {
+        if (opts.avcHtml) return html("<html><body><h1>Just a moment</h1></body></html>");
+        return text(MEDIA);
+      }
       return new Response("no", { status: 404 });
     }
     if (u.hostname === "playmate.to") {
       if (path === "/api/s" && method === "POST") {
-        const body = String(opts.body || "");
+        const body = String(opts2.body || "");
         assert.ok(body.includes('"c":"CODE720"'), "el cuerpo lleva el filecode");
         return json({ sx: "https://frv2.plauymito.live/hls/xyz/master.txt" });
       }
@@ -103,7 +109,22 @@ function source(posts) {
     if (u.hostname === "frv2.plauymito.live") {
       if (path === "/hls/xyz/master.txt")
         return text("#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=1000000,RESOLUTION=1280x720\nindex_avc_720p.txt\n");
+      if (path === "/hls/xyz/index_avc_720p.txt") return text(MEDIA);
       return new Response("no", { status: 404 });
+    }
+    if (u.hostname === "vimeos.unlimplay.com") {
+      return json({ embeds: { latino: { direct: "https://p1.vimeos.zip/hls2/movie/master.m3u8" } } });
+    }
+    if (u.hostname === "p1.vimeos.zip") {
+      if (path === "/hls2/movie/master.m3u8") return text(MEDIA);
+      return new Response("no", { status: 404 });
+    }
+    if (u.hostname === "drive.usercontent.google.com") {
+      assert.equal(opts2.headers.Range, "bytes=0-2047");
+      return new Response("matroska-bytes", {
+        status: 206,
+        headers: { "content-type": "application/octet-stream", "accept-ranges": "bytes" },
+      });
     }
     if (u.hostname === "ok.ru") {
       return html(
@@ -156,6 +177,8 @@ test("el manifiesto cumple el contrato", async () => {
   assert.equal(m.streamHosts, "any");
   assert.ok(m.capabilities.includes("download"));
   assert.ok(m.hosts.includes("www.fuegocine.com"));
+  assert.ok(m.hosts.includes("vimeos.unlimplay.com"));
+  assert.ok(m.hosts.includes("drive.usercontent.google.com"));
   assert.ok(!m.entry.startsWith("./") && !m.icon.startsWith("./"));
 });
 
@@ -228,6 +251,7 @@ test("resolve VR: decodifica el enlace corto y usa el HLS de videro", async () =
   const { fetchImpl } = source([p]);
   const s = await run("resolve", ["5000000000000000002"], fetchImpl);
   assert.equal(s.url, "https://videro.my/hls/aaa/index.m3u8");
+  assert.equal(s.mime, "application/vnd.apple.mpegurl");
 });
 
 test("resolve AVC: pide el token y elige la variante de mayor bitrate", async () => {
@@ -235,6 +259,7 @@ test("resolve AVC: pide el token y elige la variante de mayor bitrate", async ()
   const { fetchImpl } = source([p]);
   const s = await run("resolve", ["5000000000000000003"], fetchImpl);
   assert.equal(s.url, "https://avcaption.com/api/stream/aaaabbbbccccdddd1111/playlist?token=tok&v=1080p");
+  assert.equal(s.mime, "application/vnd.apple.mpegurl");
   assert.equal(s.expiresInSeconds, 14400);
   assert.equal(s.headers.Referer, "https://avcaption.com/");
 });
@@ -244,7 +269,32 @@ test("resolve PM: consulta playmate y resuelve la variante del manifiesto", asyn
   const { fetchImpl } = source([p]);
   const s = await run("resolve", ["5000000000000000004"], fetchImpl);
   assert.equal(s.url, "https://frv2.plauymito.live/hls/xyz/index_avc_720p.txt");
+  assert.equal(s.mime, "application/vnd.apple.mpegurl");
   assert.equal(s.headers.Referer, "https://playmate.to/");
+});
+
+test("resolve UA: consulta unlimplay y devuelve HLS reproducible", async () => {
+  const p = svPost("5000000000000010011", "Pelicula UA (2025)", ["Movie", "2025"], "https://unlimplay.com/f/embed/movie/123456");
+  const { fetchImpl, asked } = source([p]);
+  const s = await run("resolve", ["5000000000000010011"], fetchImpl);
+  assert.equal(s.url, "https://p1.vimeos.zip/hls2/movie/master.m3u8");
+  assert.equal(s.mime, "application/vnd.apple.mpegurl");
+  assert.equal(s.expiresInSeconds, 43200);
+  assert.equal(s.headers.Referer, "https://videoapi.la/");
+  assert.ok(asked.some((u) => u === "https://vimeos.unlimplay.com/?id=123456&type=movie"));
+});
+
+test("resolve GD: convierte Google Drive a descarga verificable", async () => {
+  const p = svPost(
+    "5000000000000010012",
+    "Pelicula Drive (2025)",
+    ["Movie", "2025"],
+    "https://drive.google.com/file/d/DRIVEFILE123/view"
+  );
+  const { fetchImpl } = source([p]);
+  const s = await run("resolve", ["5000000000000010012"], fetchImpl);
+  assert.equal(s.url, "https://drive.usercontent.google.com/download?id=DRIVEFILE123&export=download&confirm=t");
+  assert.equal(s.headers["User-Agent"].includes("Mozilla/5.0"), true);
 });
 
 test("resolve VR: si el primer enlace falla prueba el siguiente, y acepta videro directo", async () => {
@@ -278,4 +328,27 @@ test("resolve OK.RU: lee el mp4 del HTML escapado y recuerda cuándo vence", asy
   assert.equal(s.url, "https://vd524.okcdn.ru/?expires=1&sig=abc");
   assert.equal(s.mime, "video/mp4");
   assert.equal(s.expiresInSeconds, 82800);
+});
+
+test("resolve: una lista que llega como página salta al siguiente servidor", async () => {
+  const p = svPost("5000000000000000009", "Pelicula Cascada (2025)", ["Movie", "2025"], [
+    "https://avcaption.com/watch/aaaabbbbccccdddd2222",
+    "https://playmate.to/embed/CODE720",
+  ]);
+  const { fetchImpl, asked } = source([p], { avcHtml: true });
+  const s = await run("resolve", ["5000000000000000009"], fetchImpl);
+  assert.ok(asked.some((u) => u.includes("/api/stream/aaaabbbbccccdddd2222/playlist")));
+  assert.equal(s.url, "https://frv2.plauymito.live/hls/xyz/index_avc_720p.txt");
+  assert.equal(s.mime, "application/vnd.apple.mpegurl");
+});
+
+test("resolve: si ningún servidor entrega una lista, el detalle lo dice", async () => {
+  const p = svPost("5000000000000000010", "Pelicula Rota (2025)", ["Movie", "2025"], [
+    "https://avcaption.com/watch/aaaabbbbccccdddd3333",
+  ]);
+  const { fetchImpl } = source([p], { avcHtml: true });
+  const r = await validate(root, { run: "resolve", args: ["5000000000000000010"], fetchImpl, repo: REPO });
+  assert.equal(r.problems.length, 1);
+  assert.match(r.problems[0], /ningún servidor respondió/);
+  assert.match(r.problems[0], /AVC: el servidor no devolvió una lista de reproducción/);
 });

@@ -164,6 +164,18 @@ function svLinks(html) {
   return out;
 }
 
+const PLAYLIST_MIME = "application/vnd.apple.mpegurl";
+
+async function assertPlaylist(s) {
+  const r = await kino.fetch(s.url, { headers: s.headers || {} });
+  if (!r.ok) throw new Error("la lista respondió " + r.status);
+  const head = String(await r.text())
+    .trimStart()
+    .slice(0, 64);
+  if (head.indexOf("#EXTM3U") !== 0) throw new Error("el servidor no devolvió una lista de reproducción");
+  return s;
+}
+
 function fcStream(link) {
   const m = /[?&]link=([^&]+)/.exec(unent(link));
   if (!m) return null;
@@ -188,7 +200,7 @@ async function okStream(link) {
     return { url, mime: "video/mp4", expiresInSeconds: 82800 };
   }
   const hls = /"ondemandHls":"([^"]+)"/.exec(h);
-  if (hls) return { url: hls[1].replace(/\\u0026/g, "&"), expiresInSeconds: 82800 };
+  if (hls) return { url: hls[1].replace(/\\u0026/g, "&"), mime: PLAYLIST_MIME, expiresInSeconds: 82800 };
   throw new Error("ok.ru no entregó enlaces");
 }
 
@@ -215,7 +227,7 @@ async function vrStream(link) {
   if (!r.ok) throw new Error("videro respondió " + r.status);
   const j = await r.json();
   if (!j || typeof j.hls_url !== "string" || !j.hls_url) throw new Error("videro no entregó video");
-  const s = { url: /^https?:/.test(j.hls_url) ? j.hls_url : "https://videro.my" + j.hls_url };
+  const s = { url: /^https?:/.test(j.hls_url) ? j.hls_url : "https://videro.my" + j.hls_url, mime: PLAYLIST_MIME };
   if (Array.isArray(j.tracks)) {
     const subs = [];
     for (const t of j.tracks.slice(0, 30)) {
@@ -251,6 +263,7 @@ async function avcStream(link) {
   if (!best) throw new Error("avcaption no entregó variantes");
   const s = {
     url: /^https?:/.test(best.url) ? best.url : "https://avcaption.com" + best.url,
+    mime: PLAYLIST_MIME,
     headers: { Referer: "https://avcaption.com/", "User-Agent": UA },
   };
   const exp = Number(j.expires_in);
@@ -286,8 +299,58 @@ async function pmStream(link) {
   if (!variant) throw new Error("playmate no entregó variantes");
   return {
     url: master.replace(/[^/]+$/, variant),
+    mime: PLAYLIST_MIME,
     headers: { Referer: "https://playmate.to/", "User-Agent": UA },
   };
+}
+
+async function ulStream(link) {
+  const m = /unlimplay\.com\/f\/embed\/([A-Za-z]+)\/(\d+)/.exec(unent(link));
+  if (!m) throw new Error("enlace de unlimplay incompleto");
+  const type = m[1] === "tv" || m[1] === "series" || m[1] === "serie" ? "tv" : "movie";
+  const id = m[2];
+  const headers = { "User-Agent": UA, Origin: "https://unlimplay.com" };
+  const playHeaders = { "User-Agent": UA, Referer: "https://videoapi.la/" };
+  let last = "";
+  for (let i = 0; i < 5; i++) {
+    const api = "https://vimeos.unlimplay.com/?id=" + encodeURIComponent(id) + "&type=" + encodeURIComponent(type);
+    const r = await kino.fetch(api, { headers });
+    if (!r.ok) throw new Error("unlimplay respondió " + r.status);
+    const j = await r.json();
+    const url = String(
+      (j && j.embeds && j.embeds.latino && j.embeds.latino.direct) ||
+        (j && j.embeds && j.embeds.espanol && j.embeds.espanol.direct) ||
+        (j && j.direct) ||
+        ""
+    );
+    if (!/^https:\/\//.test(url)) throw new Error("unlimplay no entregó manifiesto");
+    try {
+      await assertPlaylist({ url, mime: PLAYLIST_MIME, headers: playHeaders });
+      return { url, mime: PLAYLIST_MIME, headers: playHeaders, expiresInSeconds: 43200 };
+    } catch (e) {
+      last = String(e.message || e).slice(0, 80);
+    }
+  }
+  throw new Error("unlimplay no entregó una lista reproducible" + (last ? ": " + last : ""));
+}
+
+async function gdStream(link) {
+  const m =
+    /drive\.google\.com\/file\/d\/([^/?#]+)/.exec(unent(link)) ||
+    /drive\.google\.com\/open\?id=([^&#]+)/.exec(unent(link)) ||
+    /drive\.google\.com\/uc\?[^#]*[?&]id=([^&#]+)/.exec(unent(link));
+  if (!m) throw new Error("enlace de drive incompleto");
+  const id = m[1];
+  const url =
+    "https://drive.usercontent.google.com/download?id=" +
+    encodeURIComponent(id) +
+    "&export=download&confirm=t";
+  const r = await kino.fetch(url, { headers: { "User-Agent": UA, Range: "bytes=0-2047" } });
+  if (!r.ok && r.status !== 206) throw new Error("drive respondió " + r.status);
+  const ct = String((r.headers && r.headers.get && r.headers.get("content-type")) || "");
+  const body = await r.text();
+  if (/text\/html/i.test(ct) || /^\s*</.test(body)) throw new Error("drive devolvió una página de aviso");
+  return { url, headers: { "User-Agent": UA } };
 }
 
 const SERVERS = [
@@ -296,6 +359,8 @@ const SERVERS = [
   { name: "VR", test: (u) => u.indexOf("blogfc13.blogspot.com") >= 0 || u.indexOf("videro.my/e/") >= 0, run: vrStream },
   { name: "AVC", test: (u) => u.indexOf("avcaption.com/") >= 0, run: avcStream },
   { name: "PM", test: (u) => u.indexOf("playmate.to/") >= 0, run: pmStream },
+  { name: "UA", test: (u) => u.indexOf("unlimplay.com/f/embed/") >= 0, run: ulStream },
+  { name: "GD", test: (u) => u.indexOf("drive.google.com/") >= 0, run: gdStream },
 ];
 
 export async function search(query) {
@@ -460,6 +525,8 @@ function knownRank(url) {
   if (/ok\.ru\//.test(u)) return 3;
   if (u.indexOf("avcaption.com/") >= 0) return 3;
   if (u.indexOf("playmate.to/") >= 0) return 3;
+  if (u.indexOf("unlimplay.com/f/embed/") >= 0) return 2;
+  if (u.indexOf("drive.google.com/") >= 0) return 2;
   const m = /[?&]r=([A-Za-z0-9+/=_-]+)/.exec(u);
   if (m) {
     try {
@@ -493,7 +560,9 @@ export async function resolve(ref) {
       if (!server.test(link.url)) continue;
       try {
         const s = await server.run(link.url);
-        if (s && s.url) return s;
+        if (!s || !s.url) continue;
+        if (s.mime === PLAYLIST_MIME) return await assertPlaylist(s);
+        return s;
       } catch (err) {
         last = server.name + ": " + String(err.message).slice(0, 120);
         log("resolve " + last);
@@ -502,4 +571,3 @@ export async function resolve(ref) {
   }
   throw kino.error("unavailable", last ? "ningún servidor respondió; último intento: " + last : "ningún servidor respondió");
 }
-
