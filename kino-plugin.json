@@ -1,7 +1,7 @@
 {
   "id": "fuegocine",
   "name": "FuegoCine",
-  "version": "1.0.2",
+  "version": "1.0.3",
   "apiVersion": 5,
   "entry": "plugin.js",
   "description": "Películas y series en español de fuegocine.com: búsqueda, secciones, episodios y descargas.",
@@ -28,6 +28,6 @@
   "icon": "icon.png",
   "signature": {
     "authorKey": "5c73e82ad7d25cddd1572ad6745462c6faa3c17225172c60bf233c744ca34240",
-    "value": "170642fd41b3d09e25d1b3f6c36d8ce2692cebbc2e49a84640309b4621f757c8711974ac6c5eba47859c8102c31641b64a692945b9cf4d963470c52dba82dd07"
+    "value": "5900e75216dfb8d6a0c0d24f80e0dba2b6f33ddf16e15d7f90b63b376633389bed1e221a14548c2ef4568563f80dfadd828c21d1b0565363a0184dd8ae1e6207"
   }
 }
