@@ -261,6 +261,16 @@ test("resolve VR: si el primer enlace falla prueba el siguiente, y acepta videro
   assert.equal(s2.url, "https://videro.my/hls/aaa/index.m3u8");
 });
 
+test("resolve: cuando todo falla, el detalle dice qué servidor falló", async () => {
+  const bad = "https://blogfc13.blogspot.com/?m=1.html?r=" + Buffer.from("https://vids.st/e/175711").toString("base64");
+  const p = svPost("5000000000000000008", "Pelicula Muerta (2025)", ["Movie", "2025"], [bad]);
+  const { fetchImpl } = source([p]);
+  const r = await validate(root, { run: "resolve", args: ["5000000000000000008"], fetchImpl, repo: REPO });
+  assert.equal(r.problems.length, 1);
+  assert.match(r.problems[0], /ningún servidor respondió/);
+  assert.match(r.problems[0], /VR: destino de videro desconocido/);
+});
+
 test("resolve OK.RU: lee el mp4 del HTML escapado y recuerda cuándo vence", async () => {
   const p = svPost("5000000000000000005", "Pelicula OK (2025)", ["Movie", "2025"], "https://ok.ru/videoembed/12345");
   const { fetchImpl } = source([p]);

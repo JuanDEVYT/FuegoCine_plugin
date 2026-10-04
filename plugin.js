@@ -453,6 +453,26 @@ export async function episodes(ref) {
   return { series: seriesInfo(se), episodes };
 }
 
+function knownRank(url) {
+  const u = unent(url);
+  if (u.indexOf("videro.my/e/") >= 0) return 4;
+  if (u.indexOf("repfuegocinefree.blogspot.com") >= 0) return 3;
+  if (/ok\.ru\//.test(u)) return 3;
+  if (u.indexOf("avcaption.com/") >= 0) return 3;
+  if (u.indexOf("playmate.to/") >= 0) return 3;
+  const m = /[?&]r=([A-Za-z0-9+/=_-]+)/.exec(u);
+  if (m) {
+    try {
+      const target = atob(m[1].replace(/-/g, "+").replace(/_/g, "/"));
+      if (target.indexOf("videro.my/e/") >= 0) return 2;
+    } catch (e) {
+      // destino ilegible: queda abajo
+    }
+    return 1;
+  }
+  return 0;
+}
+
 export async function resolve(ref) {
   await null;
   const id = String(ref || "");
@@ -463,17 +483,23 @@ export async function resolve(ref) {
   if (!e) throw kino.error("not_found", "ese título ya no existe");
   const links = svLinks((e.content && e.content.$t) || "");
   if (!links.length) throw kino.error("unavailable", "este título no tiene servidores activos");
+  const ordered = links
+    .map((l, i) => ({ l, i, r: knownRank(l.url) }))
+    .sort((a, b) => b.r - a.r || a.i - b.i)
+    .map((x) => x.l);
+  let last = "";
   for (const server of SERVERS) {
-    for (const link of links) {
+    for (const link of ordered) {
       if (!server.test(link.url)) continue;
       try {
         const s = await server.run(link.url);
         if (s && s.url) return s;
       } catch (err) {
-        log("resolve " + server.name + ": " + err.message);
+        last = server.name + ": " + String(err.message).slice(0, 120);
+        log("resolve " + last);
       }
     }
   }
-  throw kino.error("unavailable", "ningún servidor respondió");
+  throw kino.error("unavailable", last ? "ningún servidor respondió; último intento: " + last : "ningún servidor respondió");
 }
 
