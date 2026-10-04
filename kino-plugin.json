@@ -6,7 +6,7 @@
   "entry": "plugin.js",
   "description": "Películas y series en español de fuegocine.com: búsqueda, secciones, episodios y descargas.",
   "author": "JuanDEVYT",
-  "homepage": "https://github.com/JuanDEVYT/kino-plugin-fuegocine",
+  "homepage": "https://github.com/JuanDEVYT/FuegoCine_plugin",
   "hosts": [
     "www.fuegocine.com",
     "ok.ru",
@@ -28,6 +28,6 @@
   "icon": "icon.png",
   "signature": {
     "authorKey": "5c73e82ad7d25cddd1572ad6745462c6faa3c17225172c60bf233c744ca34240",
-    "value": "ea6d6be15d86945bbfaec4701c33ef9c4ac6876fca1ed90b9413c7badc66b87907d542768e842621f6a534e91c7d8ced5f50353005e3b808498ec964204a2d0b"
+    "value": "6d7d3a55b30cef19f49ce374fca6042ef0073a18cec70fb6d5e06eb5d1406340957e4230e865bc04cf0524fb27e8ab0359a0d09e052a0ac05a07250980b7b402"
   }
 }
