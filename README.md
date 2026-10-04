@@ -28,7 +28,7 @@ installing.
 In Kino open Ajustes > Plugins and type the address of this repository:
 
 ```
-JuanDEVYT/kino-plugin-fuegocine
+JuanDEVYT/FuegoCine_plugin
 ```
 
 Kino reads `kino-plugin.json` and `plugin.js` from the repository root, shows the hosts the plugin

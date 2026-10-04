@@ -7,7 +7,7 @@ import { fileURLToPath } from "node:url";
 import { validate } from "../sdk/validate.mjs";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
-const REPO = "JuanDEVYT/kino-plugin-fuegocine";
+const REPO = "JuanDEVYT/FuegoCine_plugin";
 
 const json = (v) => new Response(JSON.stringify(v), { status: 200, headers: { "content-type": "application/json" } });
 const html = (s) => new Response(s, { status: 200, headers: { "content-type": "text/html; charset=utf-8" } });
