@@ -1,5 +1,4 @@
-// The person's own archive.org addresses (the url1..url6 / cat1..cat6 settings): a Home row each, first in the results of a search,
-// and paged by "Ver más". Offline: every answer is made here, and the URLs the plugin asked for are recorded.
+// FuegoCine: todo offline, con un fetch falso que imita la fuente y los proveedores.
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
@@ -8,301 +7,248 @@ import { fileURLToPath } from "node:url";
 import { validate } from "../sdk/validate.mjs";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
+const REPO = "JuanDEVYT/kino-plugin-fuegocine";
 
-const doc = (id, title) => ({ identifier: id, title, year: "1950", description: "d" });
+const json = (v) => new Response(JSON.stringify(v), { status: 200, headers: { "content-type": "application/json" } });
+const html = (s) => new Response(s, { status: 200, headers: { "content-type": "text/html; charset=utf-8" } });
+const text = (s) => new Response(s, { status: 200, headers: { "content-type": "application/vnd.apple.mpegurl" } });
 
-/** An archive.org that knows: what each advancedsearch `q` answers, and the metadata titles. */
-function archive({ answers = {}, titles = {}, files = {} } = {}) {
+function post(id, title, terms, content) {
+  return {
+    id: { $t: "tag:blogger.com,1999:blog-1.post-" + id },
+    title: { $t: title },
+    category: terms.map((t) => ({ term: t })),
+    content: { $t: content },
+    published: { $t: "2026-01-05T12:00:00.000Z" },
+  };
+}
+
+const movieContent =
+  '<div data-post-type="movie"></div>' +
+  '<img src="https://media.themoviedb.org/t/p/w440_and_h660_face/poster.jpg">' +
+  '<div id="tmdb-synopsis">Una sinopsis de prueba.</div>' +
+  '<ul class="post-details mb-4" data-backdrop="https://image.tmdb.org/t/p/original/back.jpg" data-imdb="7.4">' +
+  '<li data-duartion="1h 42m"><span>Duración</span>1h 42m</li><li data-year="2024"><span>Año</span>2024</li></ul>' +
+  '<div data-genres="Acción,Drama"></div>' +
+  '<script>const _SV_LINKS = [{ lang: "lat", name: "FC✅", quality: "HD", url: "https://repfuegocinefree.blogspot.com/?player=fluidplayer&amp;link=https%3A%2F%2Fcdn.example.com%2Fvideo.mp4", tagVideo: false }];</script>';
+
+function svPost(id, title, terms, url) {
+  const content =
+    '<div data-post-type="movie"></div>' +
+    '<img src="https://media.themoviedb.org/t/p/w440_and_h660_face/p2.jpg">' +
+    '<div id="tmdb-synopsis">Sinopsis.</div>' +
+    '<ul class="post-details mb-4" data-imdb="6"><li data-year="2025"></li></ul>' +
+    '<div data-genres="Terror"></div>' +
+    '<script>const _SV_LINKS = [{ lang: "lat", name: "X", quality: "HD", url: "' + url + '", tagVideo: false }];</script>';
+  return post(id, title, terms, content);
+}
+
+const seriesPost = post(
+  "9990001112223334445",
+  "Gran Serie - Todas las Temporadas (2020 - 2026)",
+  ["Serie", "2020", "Drama", "Estreno"],
+  '<div data-post-type="serie"></div><img src="https://media.themoviedb.org/t/p/w440_and_h660_face/s.jpg">' +
+    '<div id="tmdb-synopsis">Sobre una serie.</div><ul class="post-details mb-4" data-imdb="8.2"><li data-year="2020"></li></ul>' +
+    '<div data-genres="Drama,Crimen"></div>'
+);
+
+const episode1 = post("1000000000000000001", "Gran Serie 1x1", ["Episode", "id-9990001112223334445"],
+  '<div data-post-type="episode"></div><img src="https://www.themoviedb.org/t/p/w1280/still1.jpg">' +
+  '<div id="tmdb-synopsis">Episodio uno.</div>');
+const episode2 = post("1000000000000000002", "Gran Serie 1x2", ["Episode", "id-9990001112223334445"],
+  '<div data-post-type="episode"></div><img src="https://www.themoviedb.org/t/p/w1280/still2.jpg">');
+
+const movie = post("5000000000000000001", "Cine Prueba (2024)", ["Movie", "2024", "Acción", "Estreno"], movieContent);
+
+function source(posts) {
   const asked = [];
-  const fetchImpl = async (url) => {
+  const fetchImpl = async (url, opts = {}) => {
+    const u = new URL(String(url));
     asked.push(String(url));
-    const u = new URL(url);
-    if (u.pathname === "/advancedsearch.php") {
-      const q = u.searchParams.get("q");
-      // An OR of several scopes answers with the union of what each one holds, like archive.org.
-      const docs = [];
-      for (const [needle, list] of Object.entries(answers)) if (q.includes(needle)) for (const d of list) if (!docs.some((x) => x.identifier === d.identifier)) docs.push(d);
-      return new Response(JSON.stringify({ response: { docs } }), { status: 200, headers: { "content-type": "application/json" } });
+    const path = decodeURIComponent(u.pathname);
+    const method = String(opts.method || "GET").toUpperCase();
+
+    if (u.hostname === "videro.my") {
+      const m = /^\/api\/videos\/public\/([A-Za-z0-9]+)$/.exec(path);
+      if (m) return json({ title: "t", share_id: m[1], hls_url: "/hls/aaa/index.m3u8", tracks: [] });
+      return new Response("no", { status: 404 });
     }
-    const whole = /^\/metadata\/([^/]+)$/.exec(u.pathname);
-    if (whole && files[whole[1]]) return new Response(JSON.stringify({ metadata: { title: titles[whole[1]] || whole[1] }, files: files[whole[1]] }), { status: 200, headers: { "content-type": "application/json" } });
-    const m = /^\/metadata\/([^/]+)\/metadata$/.exec(u.pathname);
-    if (m && titles[m[1]]) return new Response(JSON.stringify({ result: { title: titles[m[1]] } }), { status: 200, headers: { "content-type": "application/json" } });
-    return new Response("{}", { status: 404 });
+    if (u.hostname === "avcaption.com") {
+      const m = /^\/api\/stream\/([A-Za-z0-9]+)\/token$/.exec(path);
+      if (m) {
+        return json({
+          expires_in: 14400,
+          playlist_token: "tok",
+          session_id: "s",
+          master_m3u8:
+            "#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=500000,RESOLUTION=640x360\n" +
+            "/api/stream/" + m[1] + "/playlist?token=tok&v=360p\n" +
+            "#EXT-X-STREAM-INF:BANDWIDTH=3000000,RESOLUTION=1920x1080\n" +
+            "/api/stream/" + m[1] + "/playlist?token=tok&v=1080p\n",
+        });
+      }
+      return new Response("no", { status: 404 });
+    }
+    if (u.hostname === "playmate.to") {
+      if (path === "/api/s" && method === "POST") {
+        const body = String(opts.body || "");
+        assert.ok(body.includes('"c":"CODE720"'), "el cuerpo lleva el filecode");
+        return json({ sx: "https://frv2.plauymito.live/hls/xyz/master.txt" });
+      }
+      return new Response("no", { status: 404 });
+    }
+    if (u.hostname === "frv2.plauymito.live") {
+      if (path === "/hls/xyz/master.txt")
+        return text("#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=1000000,RESOLUTION=1280x720\nindex_avc_720p.txt\n");
+      return new Response("no", { status: 404 });
+    }
+    if (u.hostname === "ok.ru") {
+      return html(
+        '<script>var x = &quot;ondemandHls&quot;:&quot;https:\\/\\/vd.okcdn.ru\\/h.m3u8&quot;,' +
+          '&quot;videos&quot;:[{&quot;name&quot;:&quot;full&quot;,&quot;url&quot;:&quot;https:\\/\\/vd524.okcdn.ru\\/?expires=1\\u0026sig=abc&quot;}]</script>'
+      );
+    }
+    if (u.hostname !== "www.fuegocine.com") return new Response("?", { status: 404 });
+
+    if (/^\/feeds\/posts\/default\/-\/.+/.test(path)) {
+      const label = path.replace(/^\/feeds\/posts\/default\/-\//, "");
+      const max = Number(u.searchParams.get("max-results") || "25");
+      const start = Number(u.searchParams.get("start-index") || "1");
+      const hits = posts.filter((p) => (p.category || []).some((c) => c.term === label));
+      return json({ feed: { entry: hits.slice(start - 1, start - 1 + max) } });
+    }
+    const one = /^\/feeds\/posts\/default\/(\d+)$/.exec(path);
+    if (one) {
+      const found = posts.filter((p) => p.id.$t.endsWith("post-" + one[1]));
+      return json(found.length ? { entry: found } : { feed: { entry: [] } });
+    }
+    if (path === "/feeds/posts/default" && u.searchParams.has("q")) {
+      const q = (u.searchParams.get("q") || "").toLowerCase();
+      const hits = posts.filter((p) => {
+        const hay = ((p.title && p.title.$t) || "") + " " + ((p.content && p.content.$t) || "");
+        return hay.toLowerCase().includes(q);
+      });
+      return json({ feed: { entry: hits.slice(0, Number(u.searchParams.get("max-results") || "25")) } });
+    }
+    return json({ feed: { entry: posts } });
   };
   return { fetchImpl, asked };
 }
 
-async function run(fn, args, config, fetchImpl) {
-  const r = await validate(root, { run: fn, args, config, fetchImpl });
+async function run(fn, args, fetchImpl) {
+  const r = await validate(root, { run: fn, args, fetchImpl, repo: REPO });
   assert.deepEqual(r.problems, []);
   assert.deepEqual(r.drops, []);
   return r.output;
 }
 
-const BUILT_IN = ["films", "tv", "cartoons"];
-/** What the three built-in rows need, so a Home run has no empty row for the checker to drop. */
-const builtIns = { feature_films: [doc("f1", "Film")], classic_tv: [doc("t1", "TV")], animationandcartoons: [doc("c1", "Cartoon")] };
-
-test("the manifest declares six address slots, each with an optional category, at apiVersion 3, and Kino accepts it", async () => {
-  const r = await validate(root);
+test("el manifiesto cumple el contrato", async () => {
+  const r = await validate(root, { repo: REPO });
   assert.deepEqual(r.problems, []);
   const m = JSON.parse(readFileSync(join(root, "kino-plugin.json"), "utf8"));
-  // apiVersion 3 so Kino 0.9.43 (which knows no list settings) installs it; download is apiVersion 2.
-  assert.equal(m.apiVersion, 3);
+  assert.equal(m.id, "fuegocine");
+  assert.equal(m.apiVersion, 5);
+  assert.equal(m.entry, "plugin.js");
+  assert.equal(m.icon, "icon.png");
+  assert.equal(m.streamHosts, "any");
   assert.ok(m.capabilities.includes("download"));
-  const expected = [];
-  for (let i = 1; i <= 6; i++) expected.push(["url" + i, "url", false], ["cat" + i, "text", false]);
-  assert.deepEqual(m.settings.map((s) => [s.key, s.type, !!s.required]), expected);
+  assert.ok(m.hosts.includes("www.fuegocine.com"));
+  assert.ok(!m.entry.startsWith("./") && !m.icon.startsWith("./"));
 });
 
-test("without addresses the Home is what it always was", async () => {
-  const { fetchImpl } = archive({ answers: builtIns });
-  const rows = await run("home", [], {}, fetchImpl);
-  assert.deepEqual(rows.map((r) => r.id), BUILT_IN);
+test("search: los capítulos llevan a su serie y las películas quedan como películas", async () => {
+  const { fetchImpl, asked } = source([episode1, movie, seriesPost]);
+  const out = await run("search", ["1x1"], fetchImpl);
+  assert.equal(out.items.length, 1);
+  assert.equal(out.items[0].kind, "series");
+  assert.equal(out.items[0].id, "9990001112223334445");
+  assert.ok(asked.some((u) => u.includes("/9990001112223334445?")));
+
+  const found = await run("search", ["Cine Prueba"], fetchImpl);
+  assert.equal(found.items.length, 1);
+  assert.equal(found.items[0].kind, "movie");
+  assert.equal(found.items[0].year, "2024");
+  assert.deepEqual(found.items[0].genres, ["Acción", "Drama"]);
+  assert.equal(found.items[0].rating, 7.4);
+  assert.equal(found.items[0].runtimeMinutes, 102);
+  assert.deepEqual(found.items[0].badges, ["Estreno"]);
+
+  const none = await run("search", ["   "], fetchImpl);
+  assert.deepEqual(none.items, []);
 });
 
-test("a collection address becomes the first Home row, newest additions first, titled after the collection", async () => {
-  const { fetchImpl, asked } = archive({
-    answers: { "collection:(mis-pelis)": [doc("a", "Nueva"), doc("b", "Vieja")], ...builtIns },
-    titles: { "mis-pelis": "Mis películas" },
-  });
-  const rows = await run("home", [], { url1: "https://archive.org/details/mis-pelis" }, fetchImpl);
-  assert.deepEqual(rows.map((r) => r.id), ["src1", ...BUILT_IN]);
-  assert.equal(rows[0].title, "Mis películas");
-  assert.equal(rows[0].ref, "src1");
-  assert.deepEqual(rows[0].items.map((i) => i.id), ["a", "b"]);
-  assert.ok(rows[0].items.every((i) => i.kind === "movie"));
-  const own = asked.find((u) => u.includes("mis-pelis") && u.includes("advancedsearch") && u.includes("rows=30"));
-  assert.ok(decodeURIComponent(own).includes("collection:(mis-pelis) AND mediatype:(movies)"));
-  assert.ok(decodeURIComponent(own).includes("sort[]=addeddate desc"), "the newest first");
+test("home: solo quedan las filas con contenido, browse pagina con start-index", async () => {
+  const many = [];
+  for (let i = 0; i < 53; i++) {
+    many.push(post(String(600000000000000 + i), "Película " + i + " (2025)", ["Movie", "2025"], movieContent));
+  }
+  const { fetchImpl } = source([movie, seriesPost, ...many]);
+  const rows = await run("home", [], fetchImpl);
+  assert.deepEqual(
+    rows.map((r) => r.id),
+    ["estrenos", "peliculas", "series", "accion", "drama", "ano-2025", "ano-2024"]
+  );
+  assert.equal(rows[0].genre, "otros");
+  assert.equal(rows[1].genre, "peliculas");
+  assert.equal(rows[2].genre, "series");
+  assert.ok(rows[1].items.length > 0);
+
+  const page1 = await run("browse", ["peliculas", null], fetchImpl);
+  assert.equal(page1.items.length, 50);
+  assert.equal(page1.next, "51");
+  const page2 = await run("browse", ["peliculas", "51"], fetchImpl);
+  assert.equal(page2.items.length, 4);
+  assert.equal(page2.next, null);
 });
 
-test("an item address is a row with that one video when it is not a collection", async () => {
-  const { fetchImpl } = archive({ answers: { "identifier:(un-video)": [doc("un-video", "Un video")], ...builtIns }, titles: { "un-video": "Un video" } });
-  const rows = await run("home", [], { url1: "https://archive.org/details/un-video" }, fetchImpl);
-  assert.equal(rows[0].id, "src1");
-  assert.deepEqual(rows[0].items.map((i) => i.id), ["un-video"]);
+test("episodes: ordena por temporada y capítulo y quita el nombre de la serie repetido", async () => {
+  const { fetchImpl } = source([seriesPost, episode2, episode1]);
+  const out = await run("episodes", ["9990001112223334445"], fetchImpl);
+  assert.equal(out.series.title, "Gran Serie - Todas las Temporadas (2020 - 2026)");
+  assert.deepEqual(out.episodes.map((e) => [e.season, e.number]), [[1, 1], [1, 2]]);
+  assert.equal(out.episodes[0].title, "");
+  assert.equal(out.episodes[0].still, "https://www.themoviedb.org/t/p/w1280/still1.jpg");
+  assert.equal(out.episodes[0].airDate, "2026-01-05");
 });
 
-test("a search address runs that search, movies only", async () => {
-  const { fetchImpl, asked } = archive({ answers: { "subject:noir": [doc("n1", "Noir")], ...builtIns } });
-  const rows = await run("home", [], { url2: "https://archive.org/search?query=subject%3Anoir" }, fetchImpl);
-  assert.equal(rows[0].id, "src2");
-  assert.deepEqual(rows[0].items.map((i) => i.id), ["n1"]);
-  const own = decodeURIComponent(asked.find((u) => u.includes("noir")));
-  assert.ok(own.includes("(subject:noir) AND mediatype:(movies)"));
+test("resolve FC: enlace directo, sin tocar el servidor del enlace", async () => {
+  const { fetchImpl, asked } = source([movie]);
+  const s = await run("resolve", ["5000000000000000001"], fetchImpl);
+  assert.equal(s.url, "https://cdn.example.com/video.mp4");
+  assert.equal(s.mime, "video/mp4");
+  assert.equal(asked.length, 1);
 });
 
-test("an address that is not archive.org, or is garbage, is left out without breaking the Home", async () => {
-  const { fetchImpl } = archive({ answers: builtIns });
-  const rows = await run("home", [], { url1: "https://example.com/details/x", url2: "no es una url", url3: "https://archive.org/about" }, fetchImpl);
-  assert.deepEqual(rows.map((r) => r.id), BUILT_IN);
+test("resolve VR: decodifica el enlace corto y usa el HLS de videro", async () => {
+  const short = "https://blogfc13.blogspot.com/?m=1.html?r=" + Buffer.from("https://videro.my/e/abc123xyz").toString("base64");
+  const p = svPost("5000000000000000002", "Pelicula VR (2025)", ["Movie", "2025"], short);
+  const { fetchImpl } = source([p]);
+  const s = await run("resolve", ["5000000000000000002"], fetchImpl);
+  assert.equal(s.url, "https://videro.my/hls/aaa/index.m3u8");
 });
 
-test("Ver más pages an own row, and an unknown row is not_found", async () => {
-  const many = Array.from({ length: 50 }, (_, i) => doc("x" + i, "X" + i));
-  const { fetchImpl } = archive({ answers: { "collection:(mis-pelis)": many } });
-  const cfg = { url1: "https://archive.org/details/mis-pelis" };
-  const page = await run("browse", ["src1"], cfg, fetchImpl);
-  assert.equal(page.items.length, 50);
-  assert.equal(page.next, "2");
-  const r = await validate(root, { run: "browse", args: ["src5"], config: cfg, fetchImpl });
-  assert.ok(r.problems.some((p) => /not_found|ya no existe/.test(p)) || r.output == null);
+test("resolve AVC: pide el token y elige la variante de mayor bitrate", async () => {
+  const p = svPost("5000000000000000003", "Pelicula AVC (2025)", ["Movie", "2025"], "https://avcaption.com/watch/aaaabbbbccccdddd1111");
+  const { fetchImpl } = source([p]);
+  const s = await run("resolve", ["5000000000000000003"], fetchImpl);
+  assert.equal(s.url, "https://avcaption.com/api/stream/aaaabbbbccccdddd1111/playlist?token=tok&v=1080p");
+  assert.equal(s.expiresInSeconds, 14400);
+  assert.equal(s.headers.Referer, "https://avcaption.com/");
 });
 
-test("a search puts what is inside the person's addresses first, once", async () => {
-  const { fetchImpl } = archive({
-    answers: {
-      "collection:(mis-pelis)": [doc("mine", "Casablanca copia")],
-      // The same video is also in the global results, after another one: the own one still leads, and is listed once.
-      feature_films: [doc("f2", "Casablanca"), doc("mine", "Casablanca copia")],
-    },
-  });
-  const out = await run("search", ["casablanca"], { url1: "https://archive.org/details/mis-pelis" }, fetchImpl);
-  assert.deepEqual(out.items.map((i) => i.id), ["mine", "f2"]);
+test("resolve PM: consulta playmate y resuelve la variante del manifiesto", async () => {
+  const p = svPost("5000000000000000004", "Pelicula PM (2025)", ["Movie", "2025"], "https://playmate.to/embed/CODE720");
+  const { fetchImpl } = source([p]);
+  const s = await run("resolve", ["5000000000000000004"], fetchImpl);
+  assert.equal(s.url, "https://frv2.plauymito.live/hls/xyz/index_avc_720p.txt");
+  assert.equal(s.headers.Referer, "https://playmate.to/");
 });
 
-test("addresses with the same category (any capitals) share one Home row, in a single query, named as typed first", async () => {
-  const { fetchImpl, asked } = archive({
-    answers: { "collection:(uno)": [doc("a", "A")], "collection:(dos)": [doc("b", "B")], ...builtIns },
-    titles: { uno: "Uno", dos: "Dos" },
-  });
-  const cfg = { url1: "https://archive.org/details/uno", cat1: "Mis clásicos", url2: "https://archive.org/details/dos", cat2: "mis CLÁSICOS" };
-  const rows = await run("home", [], cfg, fetchImpl);
-  assert.deepEqual(rows.map((r) => r.id), ["cat1", ...BUILT_IN]);
-  assert.equal(rows[0].title, "Mis clásicos");
-  assert.equal(rows[0].ref, "cat1");
-  assert.deepEqual(rows[0].items.map((i) => i.id).sort(), ["a", "b"]);
-  const combined = asked.map(decodeURIComponent).find((u) => u.includes("rows=30") && u.includes("collection:(uno)") && u.includes("collection:(dos)"));
-  assert.ok(combined && combined.includes(" OR "), "one query for the whole category");
-});
-
-test("one address with a category is a row named after the category, not after the collection", async () => {
-  const { fetchImpl } = archive({ answers: { "collection:(uno)": [doc("a", "A")], ...builtIns }, titles: { uno: "Título de la colección" } });
-  const rows = await run("home", [], { url3: "https://archive.org/details/uno", cat3: "Para los niños" }, fetchImpl);
-  assert.equal(rows[0].id, "cat3");
-  assert.equal(rows[0].title, "Para los niños");
-});
-
-test("addresses without a category keep a row each, next to a categorised one", async () => {
-  const { fetchImpl } = archive({ answers: { "collection:(uno)": [doc("a", "A")], "collection:(dos)": [doc("b", "B")], "collection:(tres)": [doc("c", "C")], ...builtIns }, titles: { uno: "Uno", dos: "Dos", tres: "Tres" } });
-  const cfg = { url1: "https://archive.org/details/uno", url2: "https://archive.org/details/dos", cat2: "Solo dos", url3: "https://archive.org/details/tres" };
-  const rows = await run("home", [], cfg, fetchImpl);
-  assert.deepEqual(rows.map((r) => r.id), ["src1", "cat2", "src3", ...BUILT_IN]);
-  assert.deepEqual(rows.slice(0, 3).map((r) => r.title), ["Uno", "Solo dos", "Tres"]);
-});
-
-test("a category with no address behind it makes no row", async () => {
-  const { fetchImpl } = archive({ answers: builtIns });
-  const rows = await run("home", [], { cat1: "Nada", url2: "no es una url", cat2: "Tampoco" }, fetchImpl);
-  assert.deepEqual(rows.map((r) => r.id), BUILT_IN);
-});
-
-test("Ver más on a category pages the whole category's query", async () => {
-  const many = Array.from({ length: 50 }, (_, i) => doc("x" + i, "X" + i));
-  const { fetchImpl, asked } = archive({ answers: { "collection:(uno)": many, "collection:(dos)": many } });
-  const cfg = { url1: "https://archive.org/details/uno", cat1: "Mix", url2: "https://archive.org/details/dos", cat2: "Mix" };
-  const page = await run("browse", ["cat1"], cfg, fetchImpl);
-  assert.equal(page.items.length, 50);
-  assert.equal(page.next, "2");
-  const q = asked.map(decodeURIComponent).find((u) => u.includes("rows=50"));
-  assert.ok(q.includes("collection:(uno)") && q.includes("collection:(dos)") && q.includes(" OR "));
-});
-
-test("a search looks inside every address at once, whatever their categories", async () => {
-  const { fetchImpl, asked } = archive({ answers: { "collection:(uno)": [doc("a", "Cine A")], "collection:(dos)": [doc("b", "Cine B")] } });
-  const cfg = { url1: "https://archive.org/details/uno", cat1: "X", url2: "https://archive.org/details/dos" };
-  const out = await run("search", ["cine"], cfg, fetchImpl);
-  assert.ok(out.items.some((i) => i.id === "a") || out.items.some((i) => i.id === "b"));
-  const own = asked.map(decodeURIComponent).find((u) => u.includes("title:(cine)") && u.includes("collection:(uno)") && u.includes("collection:(dos)"));
-  assert.ok(own, "one search over both scopes");
-});
-
-const mp4 = (name, extra = {}) => ({ name, source: "original", format: "h.264", length: "60", ...extra });
-
-test("an item address with several videos is one card per video, playable one by one", async () => {
-  const { fetchImpl } = archive({
-    answers: { "identifier:(serie)": [doc("serie", "Mi serie")], ...builtIns },
-    titles: { serie: "Mi serie" },
-    files: { serie: [mp4("S01E01 - Uno.mp4"), mp4("S01E02 - Dos.mp4"), mp4("S01E03 - Tres.mp4")] },
-  });
-  const rows = await run("home", [], { url1: "https://archive.org/details/serie" }, fetchImpl);
-  assert.equal(rows[0].id, "src1");
-  assert.deepEqual(rows[0].items.map((i) => i.id), ["serie~1", "serie~2", "serie~3"]);
-  assert.deepEqual(rows[0].items.map((i) => i.ref), ["serie|S01E01 - Uno.mp4", "serie|S01E02 - Dos.mp4", "serie|S01E03 - Tres.mp4"]);
-  assert.ok(rows[0].items.every((i) => i.kind === "movie" && i.title.startsWith("Mi serie")));
-  assert.deepEqual(rows[0].items.map((i) => i.title.split(" · ")[1]), ["Uno", "Dos", "Tres"]);
-});
-
-test("an item with a single video stays one card with the plain identifier", async () => {
-  const { fetchImpl } = archive({
-    answers: { "identifier:(solo)": [doc("solo", "Solo uno")], ...builtIns },
-    files: { solo: [mp4("solo.mp4")] },
-  });
-  const rows = await run("home", [], { url1: "https://archive.org/details/solo" }, fetchImpl);
-  assert.deepEqual(rows[0].items.map((i) => [i.id, i.ref]), [["solo", "solo"]]);
-});
-
-test("a category can hold a collection and a multi-video item together", async () => {
-  const { fetchImpl } = archive({
-    answers: { "collection:(col)": [doc("c1", "De la colección")], "identifier:(serie)": [doc("serie", "Mi serie")], ...builtIns },
-    files: { serie: [mp4("a.mp4"), mp4("b.mp4")] },
-  });
-  const cfg = { url1: "https://archive.org/details/col", cat1: "Mezcla", url2: "https://archive.org/details/serie", cat2: "Mezcla" };
-  const rows = await run("home", [], cfg, fetchImpl);
-  assert.equal(rows[0].id, "cat1");
-  assert.deepEqual(rows[0].items.map((i) => i.id).sort(), ["c1", "serie~1", "serie~2"]);
-});
-
-test("a search finds a video by its own title inside a multi-video item address", async () => {
-  // archive.org's own title search does not match the item ("Mi serie"), so the plugin has to look inside it.
-  const { fetchImpl } = archive({
-    answers: {},
-    files: { serie: [mp4("Capitulo uno.mp4"), mp4("El gran final.mp4")] },
-  });
-  const out = await run("search", ["gran final"], { url1: "https://archive.org/details/serie" }, fetchImpl);
-  assert.deepEqual(out.items.map((i) => i.ref), ["serie|El gran final.mp4"]);
-});
-
-// ---- Searching by every title Kino knows for the work ---------------------------------------------------
-const searchOf = (fields) => JSON.stringify({ q: "", type: "any", year: 0, originalTitle: "", altTitles: [], ...fields });
-const doy = (id, title, year) => ({ identifier: id, title, year, description: "d" });
-const searches = (asked) => asked.filter((u) => u.includes("/advancedsearch.php")).map((u) => new URL(u).searchParams.get("q"));
-
-test("a Spanish title archive.org does not know finds the film by its original title", async () => {
-  const { fetchImpl, asked } = archive({
-    answers: { "title:(The Great Train Robbery) AND collection:(feature_films)": [doy("TheGreatTrainRobbery_555", "The Great Train Robbery", "1903")] },
-  });
-  const out = await run("search", [searchOf({ q: "Asalto y robo de un tren", originalTitle: "The Great Train Robbery", year: 1903 })], {}, fetchImpl);
-  assert.deepEqual(out.items.map((i) => i.id), ["TheGreatTrainRobbery_555"]);
-  const qs = searches(asked);
-  assert.ok(qs.some((q) => q.startsWith("title:(Asalto y robo de un tren) AND")), "what was typed is still asked");
-  assert.ok(qs.some((q) => q.startsWith("title:(The Great Train Robbery) AND")));
-});
-
-test("each title is asked by its head, so a subtitle archive.org lacks does not hide the film", async () => {
-  const { fetchImpl, asked } = archive({ answers: { "title:(Nosferatu) AND": [doy("nosferatu-1922_202504", "Nosferatu (1922)", "1922")] } });
-  const out = await run("search", [searchOf({ q: "Nosferatu, el vampiro", originalTitle: "Nosferatu, eine Symphonie des Grauens" })], {}, fetchImpl);
-  assert.deepEqual(out.items.map((i) => i.id), ["nosferatu-1922_202504"]);
-  // Both heads are "Nosferatu": one form, asked once per collection.
-  assert.deepEqual(searches(asked).map((q) => q.split(" AND ")[0]), ["title:(Nosferatu)", "title:(Nosferatu)"]);
-});
-
-test("with the year known, the film from that year (give or take one) comes first", async () => {
-  const { fetchImpl } = archive({
-    answers: {
-      "title:(Nosferatu) AND collection:(feature_films)": [
-        doy("nosferatu-1979", "Nosferatu the Vampyre", "1979"),
-        doy("nosferatu-noyear", "Nosferatu", undefined),
-        doy("nosferatu-1923", "Nosferatu", "1923"),
-        doy("nosferatu-1922", "Nosferatu", "1922"),
-      ],
-    },
-  });
-  const out = await run("search", [searchOf({ q: "Nosferatu", year: 1922 })], {}, fetchImpl);
-  assert.deepEqual(out.items.map((i) => i.id), ["nosferatu-1923", "nosferatu-1922", "nosferatu-noyear", "nosferatu-1979"]);
-});
-
-test("an item found by several titles, or in both collections, is listed once", async () => {
-  const same = doy("the-kid-1921", "The Kid", "1921");
-  const { fetchImpl, asked } = archive({ answers: { "title:(El chico)": [same], "title:(The Kid)": [same, doy("the-kid-tv", "The Kid", "1921")] } });
-  // "Metrópolis" and "Metropolis" are one title: asked once.
-  const out = await run("search", [searchOf({ q: "El chico", originalTitle: "The Kid", altTitles: ["Metrópolis", "Metropolis"] })], {}, fetchImpl);
-  assert.deepEqual(out.items.map((i) => i.id), ["the-kid-1921", "the-kid-tv"]);
-  assert.equal(searches(asked).filter((q) => /^title:\(Metr/.test(q)).length, 2);
-});
-
-test("a near-miss is dropped, but an item whose identifier is the title stays", async () => {
-  const { fetchImpl } = archive({
-    answers: {
-      "title:(The General) AND collection:(feature_films)": [doy("general-1926", "The General", "1926"), doy("thegeneral", "Buster Keaton 1926 restored", "1926"), doy("other", "General Motors ad", "1950")],
-    },
-  });
-  const out = await run("search", [searchOf({ q: "El maquinista de la General", originalTitle: "The General" })], {}, fetchImpl);
-  assert.deepEqual(out.items.map((i) => i.id).sort(), ["general-1926", "thegeneral"]);
-});
-
-test("at most four titles are asked, two requests each, however many Kino sends", async () => {
-  const { fetchImpl, asked } = archive({ answers: {} });
-  const altTitles = ["Uno largo", "Dos largo", "Tres largo", "Cuatro largo", "Cinco largo"];
-  await run("search", [searchOf({ q: "Cero largo", originalTitle: "Original largo", altTitles })], {}, fetchImpl);
-  const heads = searches(asked).map((q) => q.split(" AND ")[0]);
-  assert.equal(asked.length, 8);
-  assert.deepEqual([...new Set(heads)], ["title:(Cero largo)", "title:(Original largo)", "title:(Uno largo)", "title:(Dos largo)"]);
-});
-
-test("without an original title a search asks exactly what it always did", async () => {
-  const { fetchImpl, asked } = archive({ answers: { "collection:(feature_films)": [doy("f1", "Casablanca", "1942")], "collection:(classic_tv)": [doy("t1", "Casablanca", "1955")] } });
-  const out = await run("search", [searchOf({ q: "Casablanca" })], {}, fetchImpl);
-  assert.deepEqual(out.items.map((i) => [i.id, i.kind]), [["f1", "movie"], ["t1", "series"]]);
-  assert.deepEqual(searches(asked), ["title:(Casablanca) AND collection:(feature_films) AND mediatype:(movies)", "title:(Casablanca) AND collection:(classic_tv) AND mediatype:(movies)"]);
-});
-
-test("the person's addresses are searched by every title in one request", async () => {
-  const { fetchImpl, asked } = archive({ answers: { "collection:(mis-pelis)": [doy("mine", "The Great Train Robbery", "1903")] } });
-  const out = await run("search", [searchOf({ q: "Asalto y robo de un tren", originalTitle: "The Great Train Robbery" })], { url1: "https://archive.org/details/mis-pelis" }, fetchImpl);
-  assert.equal(out.items[0].id, "mine");
-  const own = searches(asked).find((q) => q.includes("collection:(mis-pelis)") && q.includes("title:"));
-  assert.ok(own.startsWith("(title:(Asalto y robo de un tren) OR title:(The Great Train Robbery)) AND"));
+test("resolve OK.RU: lee el mp4 del HTML escapado y recuerda cuándo vence", async () => {
+  const p = svPost("5000000000000000005", "Pelicula OK (2025)", ["Movie", "2025"], "https://ok.ru/videoembed/12345");
+  const { fetchImpl } = source([p]);
+  const s = await run("resolve", ["5000000000000000005"], fetchImpl);
+  assert.equal(s.url, "https://vd524.okcdn.ru/?expires=1&sig=abc");
+  assert.equal(s.mime, "video/mp4");
+  assert.equal(s.expiresInSeconds, 82800);
 });

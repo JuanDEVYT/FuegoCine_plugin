@@ -1,16 +1,21 @@
 {
-  "id": "archive-org",
-  "name": "Internet Archive",
-  "version": "1.4.2",
-  "apiVersion": 3,
+  "id": "fuegocine",
+  "name": "FuegoCine",
+  "version": "1.0.0",
+  "apiVersion": 5,
   "entry": "plugin.js",
-  "description": "Películas de dominio público y televisión clásica de archive.org",
-  "author": "kinotvapp",
-  "homepage": "https://github.com/kinotvapp/kino-plugin-archive",
+  "description": "Películas y series en español de fuegocine.com: búsqueda, secciones, episodios y descargas.",
+  "author": "JuanDEVYT",
+  "homepage": "https://github.com/JuanDEVYT/kino-plugin-fuegocine",
   "hosts": [
-    "archive.org",
-    "*.archive.org"
+    "www.fuegocine.com",
+    "ok.ru",
+    "videro.my",
+    "avcaption.com",
+    "playmate.to",
+    "frv2.plauymito.live"
   ],
+  "streamHosts": "any",
   "capabilities": [
     "search",
     "home",
@@ -19,80 +24,10 @@
     "resolve",
     "download"
   ],
-  "color": "#E0A030",
+  "color": "#E23A1E",
   "icon": "icon.png",
-  "settings": [
-    {
-      "key": "url1",
-      "label": "Dirección 1",
-      "type": "url",
-      "hint": "https://archive.org/details/… o una búsqueda"
-    },
-    {
-      "key": "cat1",
-      "label": "Categoría 1",
-      "type": "text",
-      "hint": "Opcional: nombre de la fila en el Home"
-    },
-    {
-      "key": "url2",
-      "label": "Dirección 2",
-      "type": "url",
-      "hint": "https://archive.org/details/… o una búsqueda"
-    },
-    {
-      "key": "cat2",
-      "label": "Categoría 2",
-      "type": "text",
-      "hint": "Opcional: nombre de la fila en el Home"
-    },
-    {
-      "key": "url3",
-      "label": "Dirección 3",
-      "type": "url",
-      "hint": "https://archive.org/details/… o una búsqueda"
-    },
-    {
-      "key": "cat3",
-      "label": "Categoría 3",
-      "type": "text",
-      "hint": "Opcional: nombre de la fila en el Home"
-    },
-    {
-      "key": "url4",
-      "label": "Dirección 4",
-      "type": "url",
-      "hint": "https://archive.org/details/… o una búsqueda"
-    },
-    {
-      "key": "cat4",
-      "label": "Categoría 4",
-      "type": "text",
-      "hint": "Opcional: nombre de la fila en el Home"
-    },
-    {
-      "key": "url5",
-      "label": "Dirección 5",
-      "type": "url",
-      "hint": "https://archive.org/details/… o una búsqueda"
-    },
-    {
-      "key": "cat5",
-      "label": "Categoría 5",
-      "type": "text",
-      "hint": "Opcional: nombre de la fila en el Home"
-    },
-    {
-      "key": "url6",
-      "label": "Dirección 6",
-      "type": "url",
-      "hint": "https://archive.org/details/… o una búsqueda"
-    },
-    {
-      "key": "cat6",
-      "label": "Categoría 6",
-      "type": "text",
-      "hint": "Opcional: nombre de la fila en el Home"
-    }
-  ]
+  "signature": {
+    "authorKey": "5c73e82ad7d25cddd1572ad6745462c6faa3c17225172c60bf233c744ca34240",
+    "value": "3ea6b4b1d58375863a80499a466a3136da5558e0889aba32d9834d99d8b361429b7d41fb833f79a95d08fdee1f5decfa97dc4e601bf2edaea420f7f33edecf02"
+  }
 }
