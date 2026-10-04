@@ -193,17 +193,25 @@ async function okStream(link) {
 }
 
 async function vrStream(link) {
-  const m = /[?&]r=([A-Za-z0-9+/=_-]+)/.exec(unent(link));
-  if (!m) throw new Error("enlace de videro incompleto");
-  let target = "";
-  try {
-    target = atob(m[1].replace(/-/g, "+").replace(/_/g, "/"));
-  } catch (e) {
-    throw new Error("no se pudo leer el enlace de videro");
+  const u = unent(link);
+  let vid = "";
+  const direct = /videro\.my\/e\/([A-Za-z0-9]+)/.exec(u);
+  if (direct) {
+    vid = direct[1];
+  } else {
+    const m = /[?&]r=([A-Za-z0-9+/=_-]+)/.exec(u);
+    if (!m) throw new Error("enlace de videro incompleto");
+    let target = "";
+    try {
+      target = atob(m[1].replace(/-/g, "+").replace(/_/g, "/"));
+    } catch (e) {
+      throw new Error("no se pudo leer el enlace de videro");
+    }
+    const wrapped = /videro\.my\/e\/([A-Za-z0-9]+)/.exec(target);
+    if (!wrapped) throw new Error("destino de videro desconocido");
+    vid = wrapped[1];
   }
-  const vid = /videro\.my\/e\/([A-Za-z0-9]+)/.exec(target);
-  if (!vid) throw new Error("destino de videro desconocido");
-  const r = await kino.fetch("https://videro.my/api/videos/public/" + vid[1], { headers: { "User-Agent": UA } });
+  const r = await kino.fetch("https://videro.my/api/videos/public/" + vid, { headers: { "User-Agent": UA } });
   if (!r.ok) throw new Error("videro respondió " + r.status);
   const j = await r.json();
   if (!j || typeof j.hls_url !== "string" || !j.hls_url) throw new Error("videro no entregó video");
@@ -285,7 +293,7 @@ async function pmStream(link) {
 const SERVERS = [
   { name: "FC", test: (u) => u.indexOf("repfuegocinefree.blogspot.com") >= 0, run: fcStream },
   { name: "OK.RU", test: (u) => /ok\.ru\//.test(u), run: okStream },
-  { name: "VR", test: (u) => u.indexOf("blogfc13.blogspot.com") >= 0, run: vrStream },
+  { name: "VR", test: (u) => u.indexOf("blogfc13.blogspot.com") >= 0 || u.indexOf("videro.my/e/") >= 0, run: vrStream },
   { name: "AVC", test: (u) => u.indexOf("avcaption.com/") >= 0, run: avcStream },
   { name: "PM", test: (u) => u.indexOf("playmate.to/") >= 0, run: pmStream },
 ];
@@ -456,13 +464,14 @@ export async function resolve(ref) {
   const links = svLinks((e.content && e.content.$t) || "");
   if (!links.length) throw kino.error("unavailable", "este título no tiene servidores activos");
   for (const server of SERVERS) {
-    const link = links.find((l) => server.test(l.url));
-    if (!link) continue;
-    try {
-      const s = await server.run(link.url);
-      if (s && s.url) return s;
-    } catch (err) {
-      log("resolve " + server.name + ": " + err.message);
+    for (const link of links) {
+      if (!server.test(link.url)) continue;
+      try {
+        const s = await server.run(link.url);
+        if (s && s.url) return s;
+      } catch (err) {
+        log("resolve " + server.name + ": " + err.message);
+      }
     }
   }
   throw kino.error("unavailable", "ningún servidor respondió");

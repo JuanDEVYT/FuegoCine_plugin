@@ -32,14 +32,17 @@ const movieContent =
   '<div data-genres="Acción,Drama"></div>' +
   '<script>const _SV_LINKS = [{ lang: "lat", name: "FC✅", quality: "HD", url: "https://repfuegocinefree.blogspot.com/?player=fluidplayer&amp;link=https%3A%2F%2Fcdn.example.com%2Fvideo.mp4", tagVideo: false }];</script>';
 
-function svPost(id, title, terms, url) {
+function svPost(id, title, terms, urls) {
+  const list = (Array.isArray(urls) ? urls : [urls])
+    .map((url) => '{ lang: "lat", name: "X", quality: "HD", url: "' + url + '", tagVideo: false }')
+    .join(",");
   const content =
     '<div data-post-type="movie"></div>' +
     '<img src="https://media.themoviedb.org/t/p/w440_and_h660_face/p2.jpg">' +
     '<div id="tmdb-synopsis">Sinopsis.</div>' +
     '<ul class="post-details mb-4" data-imdb="6"><li data-year="2025"></li></ul>' +
     '<div data-genres="Terror"></div>' +
-    '<script>const _SV_LINKS = [{ lang: "lat", name: "X", quality: "HD", url: "' + url + '", tagVideo: false }];</script>';
+    '<script>const _SV_LINKS = [' + list + '];</script>';
   return post(id, title, terms, content);
 }
 
@@ -242,6 +245,20 @@ test("resolve PM: consulta playmate y resuelve la variante del manifiesto", asyn
   const s = await run("resolve", ["5000000000000000004"], fetchImpl);
   assert.equal(s.url, "https://frv2.plauymito.live/hls/xyz/index_avc_720p.txt");
   assert.equal(s.headers.Referer, "https://playmate.to/");
+});
+
+test("resolve VR: si el primer enlace falla prueba el siguiente, y acepta videro directo", async () => {
+  const bad = "https://blogfc13.blogspot.com/?m=1.html?r=" + Buffer.from("https://vids.st/e/175711").toString("base64");
+  const good = "https://blogfc13.blogspot.com/?m=1.html?r=" + Buffer.from("https://videro.my/e/abc123xyz").toString("base64");
+  const p = svPost("5000000000000000006", "Pelicula VR2 (2025)", ["Movie", "2025"], [bad, good]);
+  const one = source([p]);
+  const s = await run("resolve", ["5000000000000000006"], one.fetchImpl);
+  assert.equal(s.url, "https://videro.my/hls/aaa/index.m3u8");
+
+  const direct = svPost("5000000000000000007", "Pelicula VR3 (2025)", ["Movie", "2025"], "https://videro.my/e/direct99");
+  const two = source([direct]);
+  const s2 = await run("resolve", ["5000000000000000007"], two.fetchImpl);
+  assert.equal(s2.url, "https://videro.my/hls/aaa/index.m3u8");
 });
 
 test("resolve OK.RU: lee el mp4 del HTML escapado y recuerda cuándo vence", async () => {
